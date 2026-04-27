@@ -1,0 +1,31 @@
+# 环境/密钥（含 admin token、c2a key、access_token 等）
+.env
+.env.local
+.env.production
+
+# 鉴权状态文件（含 admin token 和所有 user key）
+_auth.json
+
+# chatgpt2api 数据目录（含 ChatGPT access_token）
+c2a-data/
+c2a-config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# 临时调试文件
+_test_*.json
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

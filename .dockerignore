@@ -1,0 +1,16 @@
+# 本地环境，不打进镜像
+.env
+.env.*
+_auth.json
+*.pyc
+__pycache__/
+.venv/
+venv/
+.git/
+.gitignore
+.vscode/
+.idea/
+*.log
+_test_*.json
+deploy/
+DEPLOY.md

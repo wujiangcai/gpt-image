@@ -1,0 +1,33 @@
+services:
+  chatgpt2api:
+    image: ghcr.io/basketikun/chatgpt2api:latest
+    container_name: chatgpt2api
+    restart: unless-stopped
+    volumes:
+      - ./c2a-data:/app/data
+      - ./c2a-config.json:/app/config.json:ro
+    environment:
+      - STORAGE_BACKEND=json
+      - CHATGPT2API_AUTH_KEY=${C2A_KEY}
+    # 不映射端口到 host，仅 image-gen-demo 通过 Docker 内网访问
+
+  image-gen-demo:
+    build: .
+    image: image-gen-demo:local
+    container_name: image-gen-demo
+    restart: unless-stopped
+    depends_on:
+      - chatgpt2api
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./_auth.json:/app/_auth.json
+    environment:
+      - MODE=relay
+      - IMAGE_MODEL=gpt-image-2
+      - REQUEST_TIMEOUT=180
+      - IMAGE_API_BASE=http://chatgpt2api:80/v1/images
+      - IMAGE_API_KEY=${C2A_KEY}
+      - C2A_BASE=http://chatgpt2api:80
+      - C2A_KEY=${C2A_KEY}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}

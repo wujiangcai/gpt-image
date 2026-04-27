@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>账号管理 - AI Image Generator</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0a0f;--surface:#14141f;--surface2:#1e1e2e;--border:#2a2a3e;--accent:#7c5cfc;--accent2:#a78bfa;--text:#e2e2f0;--text2:#8888a0;--success:#34d399;--danger:#f87171;--warn:#fbbf24}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 20%,rgba(124,92,252,0.08),transparent 50%);pointer-events:none;z-index:0}
+.wrap{position:relative;z-index:1;max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+.head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+h1{font-size:1.5rem;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h1::before{content:'⚙ ';-webkit-text-fill-color:var(--accent)}
+.back-link{color:var(--text2);font-size:.85rem;text-decoration:none;padding:6px 14px;border:1px solid var(--border);border-radius:8px;transition:all .2s}
+.back-link:hover{color:var(--text);border-color:var(--accent)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px}
+.card h2{font-size:1.05rem;color:var(--text);margin-bottom:14px;font-weight:600}
+.card .desc{font-size:.8rem;color:var(--text2);margin-bottom:14px;line-height:1.6}
+textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:.85rem;outline:none;font-family:'SF Mono',Consolas,monospace;line-height:1.5;min-height:140px;resize:vertical}
+textarea:focus{border-color:var(--accent)}
+.row-end{display:flex;justify-content:flex-end;gap:10px;margin-top:12px;flex-wrap:wrap}
+.btn{padding:10px 18px;border:none;border-radius:10px;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:linear-gradient(135deg,var(--accent),#6d4de8);color:#fff}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(124,92,252,0.3)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{border-color:var(--accent)}
+.btn-danger{background:rgba(248,113,113,0.12);color:var(--danger);border:1px solid rgba(248,113,113,0.3);padding:5px 10px;font-size:.75rem}
+.btn-danger:hover{background:rgba(248,113,113,0.22)}
+.spinner{width:14px;height:14px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin .6s linear infinite;display:none}
+.btn.loading .spinner{display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+thead th{text-align:left;padding:10px 12px;color:var(--text2);font-weight:500;border-bottom:1px solid var(--border);white-space:nowrap}
+tbody td{padding:12px;border-bottom:1px solid var(--border);vertical-align:middle}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:rgba(124,92,252,0.04)}
+.badge{display:inline-block;padding:3px 9px;border-radius:6px;font-size:.7rem;font-weight:500}
+.b-ok{background:rgba(52,211,153,0.15);color:var(--success)}
+.b-warn{background:rgba(251,191,36,0.15);color:var(--warn)}
+.b-err{background:rgba(248,113,113,0.15);color:var(--danger)}
+.b-type{background:rgba(124,92,252,0.15);color:var(--accent2)}
+.email{font-family:'SF Mono',Consolas,monospace;font-size:.78rem;color:var(--text)}
+.quota{font-weight:600;font-size:.95rem}
+.quota.low{color:var(--warn)}
+.quota.zero{color:var(--danger)}
+.muted{color:var(--text2);font-size:.72rem}
+.empty{text-align:center;padding:40px 20px;color:var(--text2);font-size:.85rem}
+#toast{position:fixed;top:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 20px;font-size:.85rem;z-index:100;display:none;max-width:400px;box-shadow:0 8px 24px rgba(0,0,0,0.4);transition:opacity .3s}
+#toast.show{display:block}
+#toast.success{border-color:var(--success);color:var(--success)}
+#toast.error{border-color:var(--danger);color:var(--danger)}
+#toast.info{border-color:var(--accent);color:var(--accent2)}
+.actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.tip{background:rgba(124,92,252,0.06);border:1px solid rgba(124,92,252,0.2);border-radius:10px;padding:12px 14px;font-size:.78rem;color:var(--text2);line-height:1.6;margin-bottom:14px}
+.tip code{background:var(--surface2);padding:1px 6px;border-radius:4px;color:var(--accent2);font-size:.72rem}
+.tip strong{color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="head">
+<h1>账号管理</h1>
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<span id="adminBadge" style="font-size:.75rem;color:var(--text2);padding:4px 10px;background:var(--surface2);border-radius:6px;display:none"></span>
+<a class="back-link" href="/">← 返回画图</a>
+<button onclick="logout()" style="background:transparent;color:var(--text2);font-size:.85rem;padding:6px 14px;border:1px solid var(--border);border-radius:8px;cursor:pointer">退出</button>
+</div>
+</div>
+
+<div class="card">
+<h2>添加 ChatGPT access_token</h2>
+<div class="tip">
+<strong>怎么获取 access_token？</strong><br>
+1. 浏览器登录 <code>chatgpt.com</code><br>
+2. 打开新标签访问 <code>https://chatgpt.com/api/auth/session</code><br>
+3. 复制返回 JSON 里的 <code>accessToken</code> 字段（很长一段 <code>eyJhbG...</code> 开头）<br>
+4. 粘贴到下方文本框（多个 token 一行一个）<br>
+免费账号每天 5 张图，到 UTC 6:55 重置（北京时间次日 14:55）。
+</div>
+<textarea id="tokensInput" placeholder="把 access_token 粘贴到这里，一行一个&#10;eyJhbGciOiJSUzI1NiIs..."></textarea>
+<div class="row-end">
+<button class="btn btn-primary" id="addBtn" onclick="addTokens()"><span class="spinner"></span><span>添加</span></button>
+</div>
+</div>
+
+<div class="card">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+<h2 style="margin-bottom:0">当前账号池</h2>
+<div style="display:flex;gap:8px">
+<button class="btn btn-secondary" onclick="loadAccounts()" style="padding:6px 12px;font-size:.78rem">刷新列表</button>
+<button class="btn btn-secondary" id="refreshAllBtn" onclick="refreshAll()" style="padding:6px 12px;font-size:.78rem"><span class="spinner"></span><span>同步额度</span></button>
+</div>
+</div>
+<div id="accountsBox"><div class="empty">加载中…</div></div>
+</div>
+
+<div class="card">
+<h2>用户密钥管理</h2>
+<div class="tip">
+为同事/自己创建独立的访问密钥（<code>sk-app-*</code>）。这些密钥可以画图但<strong>不能</strong>看本页面。给同事时把密钥发过去就行。
+</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
+<div style="flex:1;min-width:200px">
+<label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">用户名（备注）</label>
+<input type="text" id="newUserName" placeholder="例如：张三 / 同事A" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:.85rem;outline:none;box-sizing:border-box">
+</div>
+<button class="btn btn-primary" id="createUserBtn" onclick="createUser()"><span class="spinner"></span><span>创建用户密钥</span></button>
+</div>
+<div id="newKeyAlert" style="display:none;background:rgba(52,211,153,0.1);border:1px solid rgba(52,211,153,0.3);border-radius:10px;padding:14px;margin-bottom:14px;font-size:.82rem">
+<div style="color:var(--success);font-weight:600;margin-bottom:8px">✓ 密钥已创建，请立即复制保存</div>
+<div style="display:flex;gap:8px;align-items:center">
+<code id="newKeyValue" style="flex:1;background:var(--surface2);padding:10px;border-radius:8px;font-size:.78rem;font-family:'SF Mono',Consolas,monospace;color:var(--accent2);word-break:break-all"></code>
+<button class="btn btn-secondary" onclick="copyText(document.getElementById('newKeyValue').textContent)" style="padding:8px 12px;font-size:.75rem">复制</button>
+</div>
+</div>
+<div id="usersBox"><div class="empty">加载中…</div></div>
+</div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/auth.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+function toast(msg, type='info', ttl=3500){
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  setTimeout(() => { el.classList.remove('show'); }, ttl);
+}
+
+function fmtDate(iso){
+  if(!iso) return '-';
+  try{
+    const d = new Date(iso);
+    const now = new Date();
+    const diff = (d - now) / 1000;
+    if(diff < 0) return '已过期';
+    if(diff < 3600) return Math.round(diff/60) + ' 分钟后';
+    if(diff < 86400) return Math.round(diff/3600) + ' 小时后';
+    return d.toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+  }catch(e){ return iso.slice(0,19).replace('T',' '); }
+}
+
+function statusBadge(s){
+  if(!s) return '<span class="badge b-err">未知</span>';
+  if(s.includes('正常') || s === 'normal') return `<span class="badge b-ok">${s}</span>`;
+  if(s.includes('限流') || s.includes('rate')) return `<span class="badge b-warn">${s}</span>`;
+  return `<span class="badge b-err">${s}</span>`;
+}
+
+function quotaCell(item){
+  const lp = (item.limits_progress || []).find(x => x.feature_name === 'image_gen');
+  const remaining = lp ? lp.remaining : (item.quota ?? 0);
+  let cls = 'quota';
+  if(remaining === 0) cls += ' zero';
+  else if(remaining <= 1) cls += ' low';
+  return `<span class="${cls}">${remaining}</span><div class="muted">${item.quota ?? '?'} / day</div>`;
+}
+
+function shortToken(t){
+  if(!t) return '';
+  return t.slice(0, 14) + '…' + t.slice(-8);
+}
+
+async function loadAccounts(){
+  $('accountsBox').innerHTML = '<div class="empty">加载中…</div>';
+  try{
+    const r = await authedFetch('/api/accounts');
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    const items = d.items || [];
+    if(items.length === 0){
+      $('accountsBox').innerHTML = '<div class="empty">还没有账号，从上方添加 access_token 即可。</div>';
+      return;
+    }
+    let html = '<div style="overflow-x:auto"><table><thead><tr>'
+      + '<th>邮箱</th><th>类型</th><th>状态</th><th>今日剩余</th><th>额度重置</th><th>Token</th><th></th>'
+      + '</tr></thead><tbody>';
+    for(const item of items){
+      html += `<tr>
+        <td><span class="email">${item.email || '-'}</span></td>
+        <td><span class="badge b-type">${item.type || '-'}</span></td>
+        <td>${statusBadge(item.status)}</td>
+        <td>${quotaCell(item)}</td>
+        <td>${fmtDate(item.restoreAt)}</td>
+        <td><span class="muted" title="${item.access_token||''}">${shortToken(item.access_token)}</span></td>
+        <td><div class="actions">
+          <button class="btn btn-danger" onclick="removeToken('${(item.access_token||'').replace(/'/g,"\\'")}','${item.email||''}')">删除</button>
+        </div></td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+    $('accountsBox').innerHTML = html;
+  }catch(e){
+    $('accountsBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${e.message}</div>`;
+  }
+}
+
+async function addTokens(){
+  const raw = $('tokensInput').value.trim();
+  if(!raw){ toast('请先粘贴 access_token', 'error'); return; }
+  const tokens = raw.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const btn = $('addBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const r = await authedFetch('/api/accounts', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tokens})
+    });
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    toast(`成功添加 ${d.added || 0}，跳过 ${d.skipped || 0}`, 'success');
+    $('tokensInput').value = '';
+    await loadAccounts();
+  }catch(e){
+    toast('添加失败：' + e.message, 'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
+async function removeToken(token, email){
+  if(!confirm(`确认删除账号 ${email || '该账号'} 吗？`)) return;
+  try{
+    const r = await authedFetch('/api/accounts/remove', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tokens:[token]})
+    });
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    toast('已删除', 'success');
+    await loadAccounts();
+  }catch(e){
+    toast('删除失败：' + e.message, 'error');
+  }
+}
+
+async function refreshAll(){
+  const btn = $('refreshAllBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const r = await authedFetch('/api/accounts/refresh', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tokens:[]})
+    });
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    toast(`已同步 ${d.refreshed || 0} 个账号`, 'success');
+    await loadAccounts();
+  }catch(e){
+    toast('同步失败：' + e.message, 'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
+// ---------- 用户密钥管理 ----------
+
+function copyText(t){
+  if(!t) return;
+  navigator.clipboard.writeText(t).then(()=>toast('已复制','success')).catch(()=>{
+    const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');toast('已复制','success')}catch(e){toast('复制失败','error')}
+    finally{document.body.removeChild(ta)}
+  });
+}
+
+function fmtCreated(iso){
+  if(!iso) return '-';
+  try{ return new Date(iso).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+  catch(e){ return iso.slice(0,19).replace('T',' '); }
+}
+
+async function loadUsers(){
+  $('usersBox').innerHTML = '<div class="empty">加载中…</div>';
+  try{
+    const r = await authedFetch('/api/users');
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail?.error||d.detail||'请求失败');
+    const items = d.items||[];
+    if(items.length===0){
+      $('usersBox').innerHTML='<div class="empty">还没有用户密钥。在上方填用户名 → 创建。</div>';
+      return;
+    }
+    let html='<div style="overflow-x:auto"><table><thead><tr>'
+      +'<th>用户名</th><th>密钥</th><th>状态</th><th>创建时间</th><th></th>'
+      +'</tr></thead><tbody>';
+    for(const u of items){
+      const enabled = u.enabled !== false;
+      html+=`<tr>
+        <td><strong>${u.name||'-'}</strong></td>
+        <td><div style="display:flex;gap:6px;align-items:center">
+          <code style="font-family:'SF Mono',Consolas,monospace;font-size:.72rem;color:var(--accent2);background:var(--surface2);padding:3px 8px;border-radius:5px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${u.key}</code>
+          <button class="btn btn-secondary" onclick="copyText('${u.key}')" style="padding:4px 8px;font-size:.7rem">复制</button>
+        </div></td>
+        <td>${enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">禁用</span>'}</td>
+        <td><span class="muted">${fmtCreated(u.created)}</span></td>
+        <td><div class="actions">
+          <button class="btn btn-secondary" onclick="toggleUser('${u.id}',${!enabled})" style="padding:5px 10px;font-size:.72rem">${enabled?'禁用':'启用'}</button>
+          <button class="btn btn-danger" onclick="deleteUser('${u.id}','${(u.name||'').replace(/'/g,"\\'")}')">删除</button>
+        </div></td>
+      </tr>`;
+    }
+    html+='</tbody></table></div>';
+    $('usersBox').innerHTML = html;
+  }catch(e){
+    $('usersBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${e.message}</div>`;
+  }
+}
+
+async function createUser(){
+  const name = $('newUserName').value.trim();
+  if(!name){ toast('请填用户名','error'); return; }
+  const btn = $('createUserBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const r = await authedFetch('/api/users',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail?.error||d.detail||'创建失败');
+    $('newUserName').value = '';
+    $('newKeyValue').textContent = d.key;
+    $('newKeyAlert').style.display = 'block';
+    toast(`已创建用户密钥：${d.name}`,'success');
+    await loadUsers();
+  }catch(e){
+    toast('创建失败：'+e.message,'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
+async function deleteUser(id, name){
+  if(!confirm(`确认删除用户 ${name||'该用户'} 吗？密钥将立即失效。`)) return;
+  try{
+    const r = await authedFetch('/api/users/'+id,{method:'DELETE'});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail?.error||d.detail||'删除失败');
+    toast('已删除','success');
+    await loadUsers();
+  }catch(e){
+    toast('删除失败：'+e.message,'error');
+  }
+}
+
+async function toggleUser(id, enabled){
+  try{
+    const r = await authedFetch('/api/users/'+id,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail?.error||d.detail||'更新失败');
+    toast(enabled?'已启用':'已禁用','success');
+    await loadUsers();
+  }catch(e){
+    toast('更新失败：'+e.message,'error');
+  }
+}
+
+// 鉴权 + 启动
+(async()=>{
+  const ident = await ensureAuth(true);
+  $('adminBadge').style.display = 'inline-block';
+  $('adminBadge').textContent = `👑 ${ident.name}`;
+  await loadAccounts();
+  await loadUsers();
+})();
+</script>
+</body>
+</html>

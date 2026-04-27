@@ -1,0 +1,8 @@
+{
+  "auth-key": "this-is-overridden-by-CHATGPT2API_AUTH_KEY-env-var",
+  "refresh_account_interval_minute": 60,
+  "image_retention_days": 15,
+  "auto_remove_invalid_accounts": false,
+  "proxy": "",
+  "base_url": ""
+}
