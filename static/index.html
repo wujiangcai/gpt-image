@@ -163,9 +163,10 @@ let refImageFile=null;
     const el=document.getElementById('configInfo');
     if(!d.key_loaded){
       el.className='config-info err';
-      el.innerHTML='⚠ <code>IMAGE_API_KEY</code> 未配置，请编辑 <code>.env</code> 后重启服务';
+      el.innerHTML='⚠ 中转站 API key 未配置，请管理员进入 <code>/admin</code> 设置 API 路径、key 和模型';
     }else{
-      el.innerHTML=`后端代理已就绪<br>Mode: <code>${d.mode}</code> · Model: <code>${d.model}</code>`;
+      const endpoint = d.mode === 'relay' ? d.relay_base : d.chat_base;
+      el.innerHTML=`后端代理已就绪<br>Mode: <code>${d.mode}</code> · Model: <code>${d.model}</code>${endpoint ? ` · API: <code>${endpoint}</code>` : ''}`;
     }
   }).catch(()=>{
     const el=document.getElementById('configInfo');

@@ -127,6 +127,73 @@ class GenerateRequest(BaseModel):
     quality: Optional[str] = None
 
 
+class RelaySettingsBody(BaseModel):
+    base_url: str = Field(min_length=1, max_length=500)
+    model: str = Field(default="gpt-image-2", min_length=1, max_length=120)
+    api_key: str = Field(default="", max_length=1000)
+    clear_key: bool = False
+
+
+def _normalize_url(value: str) -> str:
+    url = value.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "API 路径必须以 http:// 或 https:// 开头")
+    return url
+
+
+def _relay_config() -> dict:
+    relay = _load_auth().get("relay") or {}
+    api_key = str(relay["api_key"]).strip() if "api_key" in relay else RELAY_KEY
+    return {
+        "base_url": str(relay.get("base_url") or RELAY_BASE).strip().rstrip("/"),
+        "api_key": api_key,
+        "model": str(relay.get("model") or MODEL).strip() or "gpt-image-2",
+    }
+
+
+def _public_relay_config() -> dict:
+    cfg = _relay_config()
+    return {
+        "base_url": cfg["base_url"],
+        "model": cfg["model"],
+        "key_loaded": bool(cfg["api_key"]),
+    }
+
+
+def _save_relay_config(body: RelaySettingsBody) -> dict:
+    data = _load_auth()
+    current = data.get("relay") or {}
+    relay = {
+        "base_url": _normalize_url(body.base_url),
+        "model": body.model.strip() or "gpt-image-2",
+        "api_key": str(current.get("api_key") or RELAY_KEY).strip(),
+    }
+    if body.clear_key:
+        relay["api_key"] = ""
+    elif body.api_key.strip():
+        relay["api_key"] = body.api_key.strip()
+    data["relay"] = relay
+    _save_auth(data)
+    return _public_relay_config()
+
+
+def _relay_auth_error() -> HTTPException:
+    return HTTPException(500, "中转站 API key 未配置，请到管理员页面设置")
+
+
+def _relay_url_error() -> HTTPException:
+    return HTTPException(500, "中转站 API 路径未配置，请到管理员页面设置")
+
+
+def _require_relay_config() -> dict:
+    cfg = _relay_config()
+    if not cfg["base_url"]:
+        raise _relay_url_error()
+    if not cfg["api_key"]:
+        raise _relay_auth_error()
+    return cfg
+
+
 def _safe_json(r: httpx.Response):
     try:
         return r.json()
@@ -141,17 +208,16 @@ def extract_image_urls(markdown: str) -> list:
 # ---------- relay mode (legacy, for otokapi / OpenAI official) ----------
 
 async def generate_via_relay(req: GenerateRequest):
-    if not RELAY_KEY:
-        raise HTTPException(500, "IMAGE_API_KEY not configured (.env)")
+    cfg = _require_relay_config()
 
-    payload: dict = {"model": MODEL, "prompt": req.prompt, "size": req.size, "n": req.n}
+    payload: dict = {"model": cfg["model"], "prompt": req.prompt, "size": req.size, "n": req.n}
     if req.quality:
         payload["quality"] = req.quality
 
-    headers = {"Authorization": f"Bearer {RELAY_KEY}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
-            r = await client.post(f"{RELAY_BASE}/generations", headers=headers, json=payload)
+            r = await client.post(f"{cfg['base_url']}/generations", headers=headers, json=payload)
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Upstream connection error: {e}")
 
@@ -254,14 +320,13 @@ async def edits(
         # chat2api supports multimodal upload via different mechanism — not implemented yet
         raise HTTPException(501, "Image edits via chat2api mode not implemented yet — use relay mode for /edits")
 
-    if not RELAY_KEY:
-        raise HTTPException(500, "IMAGE_API_KEY not configured (.env)")
-    headers = {"Authorization": f"Bearer {RELAY_KEY}"}
+    cfg = _require_relay_config()
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
     files = {"image[]": (image.filename or "ref.png", await image.read(), image.content_type or "image/png")}
-    data = {"model": MODEL, "prompt": prompt, "size": size, "n": str(n)}
+    data = {"model": cfg["model"], "prompt": prompt, "size": size, "n": str(n)}
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
-            r = await client.post(f"{RELAY_BASE}/edits", headers=headers, data=data, files=files)
+            r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Upstream connection error: {e}")
     if r.status_code >= 400:
@@ -271,16 +336,27 @@ async def edits(
 
 @app.get("/api/health")
 async def health():
+    relay = _public_relay_config()
     return {
         "ok": True,
         "mode": MODE,
-        "model": MODEL,
-        "relay_base": RELAY_BASE if MODE == "relay" else None,
+        "model": relay["model"] if MODE == "relay" else MODEL,
+        "relay_base": relay["base_url"] if MODE == "relay" else None,
         "chat_base": CHAT_BASE if MODE == "chat2api" else None,
         "proxy": PROXY,
-        "key_loaded": bool(RELAY_KEY if MODE == "relay" else CHAT_KEY),
+        "key_loaded": relay["key_loaded"] if MODE == "relay" else bool(CHAT_KEY),
         "c2a_admin": bool(C2A_BASE and C2A_KEY),
     }
+
+
+@app.get("/api/settings/relay")
+async def get_relay_settings(_: dict = Depends(require_admin)):
+    return _public_relay_config()
+
+
+@app.put("/api/settings/relay")
+async def update_relay_settings(body: RelaySettingsBody, _: dict = Depends(require_admin)):
+    return _save_relay_config(body)
 
 
 # ---------- chatgpt2api account-management proxy ----------

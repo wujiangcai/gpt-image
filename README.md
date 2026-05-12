@@ -26,13 +26,16 @@ copy .env.example .env    # Windows
 # cp .env.example .env    # macOS/Linux
 ```
 
-编辑 `.env`：
+编辑 `.env` 设置默认值（也可启动后在 `/admin` 页面覆盖）：
 
 ```
+MODE=relay
 IMAGE_API_KEY=你的真实 key
-IMAGE_API_BASE=https://otokapi.com/v1/images   # 改成你中转商的地址
+IMAGE_API_BASE=https://otokapi.com/v1/images   # 改成你中转商的图片 API 路径
 IMAGE_MODEL=gpt-image-2                         # 改成你中转商支持的模型
 ```
+
+如果 `.env` 未设置 `ADMIN_TOKEN`，服务首次启动会在日志里生成一个管理员 token，并保存到 `_auth.json`。
 
 启动：
 
@@ -44,35 +47,51 @@ python main.py
 
 页面顶部会显示当前加载的 base 和 model，确认无误后开始用。
 
+## 管理员配置中转站
+
+打开 `/admin`，用管理员 token 登录后，在「中转站生图设置」里填写：
+
+- `API 路径`：OpenAI 兼容图片接口路径，通常是 `https://your-relay.com/v1/images`
+- `模型`：例如 `gpt-image-2`
+- `API Key`：中转站提供的 key
+
+保存后立即生效，不需要重启服务。`API Key` 不会回显给前端，普通用户只能通过 `/api/health` 看到是否已配置。管理员配置会保存到 `_auth.json` 的 `relay` 字段；如果未保存管理员配置，则回退使用 `.env` 里的 `IMAGE_API_BASE`、`IMAGE_API_KEY`、`IMAGE_MODEL`。
+
+## 用户密钥
+
+管理员可在 `/admin` 的「用户密钥管理」里创建 `sk-app-*` 访问密钥。用户用该密钥登录首页后可以画图，但不能访问管理员页面或修改中转站配置。
+
 ## 支持的请求
 
 | 端点 | 用途 | 上游 |
 |------|------|------|
 | `POST /api/generate` | JSON 请求，纯文本 prompt 生图 | `{API_BASE}/generations` |
 | `POST /api/edits` | multipart 请求，带参考图 | `{API_BASE}/edits` |
-| `GET /api/health` | 健康检查 + 当前配置 | 本地 |
+| `GET /api/health` | 健康检查 + 当前公开配置 | 本地 |
+| `GET /api/settings/relay` | 管理员查看中转站配置状态 | 本地 |
+| `PUT /api/settings/relay` | 管理员保存中转站 API 路径 / 模型 / key | 本地 |
 
-后端只做**转发**，不改请求体（除了把 model 字段从 `.env` 注入），上游返回什么就返回什么。
+后端只做**转发**，不改请求体（除了把 model 字段从管理员配置或 `.env` 注入），上游返回什么就返回什么。
 
 ## 切换中转商 / 切换官方
 
-只改 `.env` 三个变量，重启服务：
+推荐在 `/admin` 的「中转站生图设置」里直接切换，保存后立即生效：
 
 ```
-# 切到 OpenAI 官方
-IMAGE_API_KEY=sk-proj-xxx
-IMAGE_API_BASE=https://api.openai.com/v1/images
-IMAGE_MODEL=gpt-image-1
+API 路径: https://api.openai.com/v1/images
+模型: gpt-image-1
+API Key: sk-proj-xxx
 
-# 切到中转
-IMAGE_API_KEY=中转商给的key
-IMAGE_API_BASE=https://your-relay.com/v1/images
-IMAGE_MODEL=gpt-image-2
+API 路径: https://your-relay.com/v1/images
+模型: gpt-image-2
+API Key: 中转商给的 key
 ```
+
+也可以修改 `.env` 作为默认值，然后重启服务；但一旦 `/admin` 保存过配置，运行时会优先使用 `_auth.json` 里的管理员配置。
 
 ## 常见错误排查
 
-页面顶部红条显示 `IMAGE_API_KEY 未配置` → `.env` 没填或没重启。
+页面顶部红条显示 `中转站 API key 未配置` → 用管理员 token 登录 `/admin`，在「中转站生图设置」里填写 API Key；或检查 `.env` 的 `IMAGE_API_KEY`。
 
 生成时 `[401] Unauthorized` → key 错了，或者中转商认证方式不是 `Bearer`（需要改 main.py 的 headers）。
 
@@ -90,8 +109,11 @@ IMAGE_MODEL=gpt-image-2
 image-gen-demo/
 ├── main.py              # FastAPI 代理后端
 ├── static/
-│   └── index.html       # 前端（暗色主题，带参考图、历史记录）
+│   ├── index.html       # 前端（暗色主题，带参考图、历史记录）
+│   ├── admin.html       # 管理员页面（中转站设置、账号池、用户密钥）
+│   └── auth.js          # 前端共享登录逻辑
 ├── requirements.txt
 ├── .env.example
-└── .env                 # 你自己创建，放 key
+├── .env                 # 本地默认配置，不提交
+└── _auth.json           # 管理员 token、用户密钥、中转站配置，不提交
 ```

@@ -18,8 +18,9 @@ h1::before{content:'⚙ ';-webkit-text-fill-color:var(--accent)}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px}
 .card h2{font-size:1.05rem;color:var(--text);margin-bottom:14px;font-weight:600}
 .card .desc{font-size:.8rem;color:var(--text2);margin-bottom:14px;line-height:1.6}
-textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:.85rem;outline:none;font-family:'SF Mono',Consolas,monospace;line-height:1.5;min-height:140px;resize:vertical}
-textarea:focus{border-color:var(--accent)}
+input,textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:.85rem;outline:none;font-family:'SF Mono',Consolas,monospace;line-height:1.5}
+textarea{min-height:140px;resize:vertical}
+input:focus,textarea:focus{border-color:var(--accent)}
 .row-end{display:flex;justify-content:flex-end;gap:10px;margin-top:12px;flex-wrap:wrap}
 .btn{padding:10px 18px;border:none;border-radius:10px;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
 .btn-primary{background:linear-gradient(135deg,var(--accent),#6d4de8);color:#fff}
@@ -68,6 +69,34 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 <span id="adminBadge" style="font-size:.75rem;color:var(--text2);padding:4px 10px;background:var(--surface2);border-radius:6px;display:none"></span>
 <a class="back-link" href="/">← 返回画图</a>
 <button onclick="logout()" style="background:transparent;color:var(--text2);font-size:.85rem;padding:6px 14px;border:1px solid var(--border);border-radius:8px;cursor:pointer">退出</button>
+</div>
+</div>
+
+<div class="card">
+<h2>中转站生图设置</h2>
+<div class="tip">
+填写 OpenAI 兼容图片接口路径和 key。路径通常形如 <code>https://example.com/v1/images</code>，生图会请求 <code>/generations</code>，参考图会请求 <code>/edits</code>。API key 留空表示保留当前 key。
+</div>
+<div style="display:grid;grid-template-columns:1fr 220px;gap:12px;margin-bottom:12px">
+  <div>
+    <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">API 路径</label>
+    <input type="url" id="relayBaseUrl" placeholder="https://your-relay.example/v1/images">
+  </div>
+  <div>
+    <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">模型</label>
+    <input type="text" id="relayModel" placeholder="gpt-image-2" value="gpt-image-2">
+  </div>
+</div>
+<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+  <div style="flex:1;min-width:260px">
+    <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">API Key</label>
+    <input type="password" id="relayApiKey" placeholder="留空则不修改当前 key">
+    <div id="relayKeyHint" class="muted" style="margin-top:6px">加载中…</div>
+  </div>
+  <label style="display:flex;align-items:center;gap:6px;color:var(--text2);font-size:.78rem;margin-bottom:10px">
+    <input type="checkbox" id="relayClearKey" style="width:auto"> 清空 key
+  </label>
+  <button class="btn btn-primary" id="saveRelayBtn" onclick="saveRelaySettings()"><span class="spinner"></span><span>保存中转设置</span></button>
 </div>
 </div>
 
@@ -166,6 +195,48 @@ function quotaCell(item){
 function shortToken(t){
   if(!t) return '';
   return t.slice(0, 14) + '…' + t.slice(-8);
+}
+
+async function loadRelaySettings(){
+  try{
+    const r = await authedFetch('/api/settings/relay');
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail?.error||d.detail||'请求失败');
+    $('relayBaseUrl').value = d.base_url || '';
+    $('relayModel').value = d.model || 'gpt-image-2';
+    $('relayApiKey').value = '';
+    $('relayClearKey').checked = false;
+    $('relayKeyHint').textContent = d.key_loaded ? '当前 key 已配置，留空保存不会覆盖。' : '当前 key 未配置，请填写中转站 key。';
+    $('relayKeyHint').style.color = d.key_loaded ? 'var(--success)' : 'var(--warn)';
+  }catch(e){
+    $('relayKeyHint').textContent = '加载失败：' + e.message;
+    $('relayKeyHint').style.color = 'var(--danger)';
+  }
+}
+
+async function saveRelaySettings(){
+  const baseUrl = $('relayBaseUrl').value.trim();
+  const model = $('relayModel').value.trim() || 'gpt-image-2';
+  const apiKey = $('relayApiKey').value.trim();
+  const clearKey = $('relayClearKey').checked;
+  if(!baseUrl){ toast('请填写 API 路径', 'error'); return; }
+  const btn = $('saveRelayBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const r = await authedFetch('/api/settings/relay', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({base_url:baseUrl, model, api_key:apiKey, clear_key:clearKey})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail?.error||d.detail||'保存失败');
+    toast('中转站设置已保存', 'success');
+    await loadRelaySettings();
+  }catch(e){
+    toast('保存失败：' + e.message, 'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
 }
 
 async function loadAccounts(){
@@ -376,6 +447,7 @@ async function toggleUser(id, enabled){
   const ident = await ensureAuth(true);
   $('adminBadge').style.display = 'inline-block';
   $('adminBadge').textContent = `👑 ${ident.name}`;
+  await loadRelaySettings();
   await loadAccounts();
   await loadUsers();
 })();
