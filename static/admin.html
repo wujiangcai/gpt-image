@@ -18,9 +18,9 @@ h1::before{content:'⚙ ';-webkit-text-fill-color:var(--accent)}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px}
 .card h2{font-size:1.05rem;color:var(--text);margin-bottom:14px;font-weight:600}
 .card .desc{font-size:.8rem;color:var(--text2);margin-bottom:14px;line-height:1.6}
-input,textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:.85rem;outline:none;font-family:'SF Mono',Consolas,monospace;line-height:1.5}
+input,textarea,select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:.85rem;outline:none;font-family:'SF Mono',Consolas,monospace;line-height:1.5}
 textarea{min-height:140px;resize:vertical}
-input:focus,textarea:focus{border-color:var(--accent)}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
 .row-end{display:flex;justify-content:flex-end;gap:10px;margin-top:12px;flex-wrap:wrap}
 .btn{padding:10px 18px;border:none;border-radius:10px;font-size:.85rem;font-weight:600;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
 .btn-primary{background:linear-gradient(135deg,var(--accent),#6d4de8);color:#fff}
@@ -73,6 +73,24 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 </div>
 
 <div class="card">
+<h2>生图来源</h2>
+<div class="tip">
+选择用户画图请求走中转站还是账号池。参考图编辑只支持 <strong>中转站 Relay</strong>。
+</div>
+<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+  <div style="flex:1;min-width:260px">
+    <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">当前来源</label>
+    <select id="modeSelect">
+      <option value="relay">中转站 Relay</option>
+      <option value="chat2api">账号池 ChatGPT</option>
+    </select>
+    <div id="modeHint" class="muted" style="margin-top:6px">加载中…</div>
+  </div>
+  <button class="btn btn-primary" id="saveModeBtn" onclick="saveModeSettings()"><span class="spinner"></span><span>保存来源</span></button>
+</div>
+</div>
+
+<div class="card">
 <h2>中转站生图设置</h2>
 <div class="tip">
 填写 OpenAI 兼容图片接口路径和 key。路径通常形如 <code>https://example.com/v1/images</code>，生图会请求 <code>/generations</code>，参考图会请求 <code>/edits</code>。API key 留空表示保留当前 key。
@@ -117,25 +135,35 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 </div>
 
 <div class="card">
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:12px;flex-wrap:wrap">
 <h2 style="margin-bottom:0">当前账号池</h2>
-<div style="display:flex;gap:8px">
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<label style="display:flex;align-items:center;gap:6px;color:var(--text2);font-size:.78rem">
+  <input type="checkbox" id="cleanupZeroQuota" style="width:auto"> 包含零额度
+</label>
+<button class="btn btn-secondary" id="previewCleanupBtn" onclick="previewCleanup()" style="padding:6px 12px;font-size:.78rem"><span class="spinner"></span><span>预览异常账号</span></button>
+<button class="btn btn-danger" id="cleanupBtn" onclick="cleanupAccounts()" style="padding:6px 12px;font-size:.78rem"><span class="spinner"></span><span>清理异常账号</span></button>
 <button class="btn btn-secondary" onclick="loadAccounts()" style="padding:6px 12px;font-size:.78rem">刷新列表</button>
 <button class="btn btn-secondary" id="refreshAllBtn" onclick="refreshAll()" style="padding:6px 12px;font-size:.78rem"><span class="spinner"></span><span>同步额度</span></button>
 </div>
 </div>
+<div id="cleanupPreview" class="tip" style="display:none"></div>
 <div id="accountsBox"><div class="empty">加载中…</div></div>
 </div>
 
 <div class="card">
 <h2>用户密钥管理</h2>
 <div class="tip">
-为同事/自己创建独立的访问密钥（<code>sk-app-*</code>）。这些密钥可以画图但<strong>不能</strong>看本页面。给同事时把密钥发过去就行。
+为同事/自己创建独立的访问密钥（<code>sk-app-*</code>）。这些密钥可以画图但<strong>不能</strong>看本页面。可以自动生成密钥，也可以粘贴已有 API key 作为用户登录密钥。
 </div>
-<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
-<div style="flex:1;min-width:200px">
+<div style="display:grid;grid-template-columns:minmax(200px,1fr) minmax(260px,1.4fr) auto;gap:10px;align-items:end;margin-bottom:14px">
+<div>
 <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">用户名（备注）</label>
 <input type="text" id="newUserName" placeholder="例如：张三 / 同事A" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:.85rem;outline:none;box-sizing:border-box">
+</div>
+<div>
+<label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">用户 API Key（可选）</label>
+<input type="password" id="newUserKey" placeholder="留空自动生成 sk-app-*">
 </div>
 <button class="btn btn-primary" id="createUserBtn" onclick="createUser()"><span class="spinner"></span><span>创建用户密钥</span></button>
 </div>
@@ -197,11 +225,52 @@ function shortToken(t){
   return t.slice(0, 14) + '…' + t.slice(-8);
 }
 
+function errMsg(d, fallback='请求失败'){
+  const value = d?.detail?.error || d?.detail || d?.error || d?.upstream?.response?.detail || fallback;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+async function loadModeSettings(){
+  try{
+    const r = await authedFetch('/api/settings/mode');
+    const d = await r.json();
+    if(!r.ok) throw new Error(errMsg(d));
+    $('modeSelect').value = d.mode || 'relay';
+    const relay = d.relay_ready ? '中转站已配置' : '中转站缺少 key 或路径';
+    const pool = d.account_pool_ready ? '账号池生图 key 已配置' : '账号池生图 key 未配置';
+    $('modeHint').textContent = `${relay}；${pool}。`;
+    $('modeHint').style.color = d.mode === 'relay' ? 'var(--accent2)' : 'var(--success)';
+  }catch(e){
+    $('modeHint').textContent = '加载失败：' + e.message;
+    $('modeHint').style.color = 'var(--danger)';
+  }
+}
+
+async function saveModeSettings(){
+  const btn = $('saveModeBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const r = await authedFetch('/api/settings/mode', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mode:$('modeSelect').value})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(errMsg(d, '保存失败'));
+    toast('生图来源已切换', 'success');
+    await loadModeSettings();
+  }catch(e){
+    toast('保存失败：' + e.message, 'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
 async function loadRelaySettings(){
   try{
     const r = await authedFetch('/api/settings/relay');
     const d = await r.json();
-    if(!r.ok) throw new Error(d.detail?.error||d.detail||'请求失败');
+    if(!r.ok) throw new Error(errMsg(d));
     $('relayBaseUrl').value = d.base_url || '';
     $('relayModel').value = d.model || 'gpt-image-2';
     $('relayApiKey').value = '';
@@ -229,7 +298,7 @@ async function saveRelaySettings(){
       body: JSON.stringify({base_url:baseUrl, model, api_key:apiKey, clear_key:clearKey})
     });
     const d = await r.json();
-    if(!r.ok) throw new Error(d.detail?.error||d.detail||'保存失败');
+    if(!r.ok) throw new Error(errMsg(d, '保存失败'));
     toast('中转站设置已保存', 'success');
     await loadRelaySettings();
   }catch(e){
@@ -244,7 +313,7 @@ async function loadAccounts(){
   try{
     const r = await authedFetch('/api/accounts');
     const d = await r.json();
-    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    if(!r.ok){ throw new Error(errMsg(d)); }
     const items = d.items || [];
     if(items.length === 0){
       $('accountsBox').innerHTML = '<div class="empty">还没有账号，从上方添加 access_token 即可。</div>';
@@ -286,7 +355,7 @@ async function addTokens(){
       body: JSON.stringify({tokens})
     });
     const d = await r.json();
-    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    if(!r.ok){ throw new Error(errMsg(d)); }
     toast(`成功添加 ${d.added || 0}，跳过 ${d.skipped || 0}`, 'success');
     $('tokensInput').value = '';
     await loadAccounts();
@@ -306,11 +375,71 @@ async function removeToken(token, email){
       body: JSON.stringify({tokens:[token]})
     });
     const d = await r.json();
-    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
-    toast('已删除', 'success');
+    if(!r.ok){ throw new Error(errMsg(d)); }
+    const deleted = d.deleted ?? 0;
+    const failed = d.failed ?? 0;
+    toast(failed ? `删除失败 ${failed} 个` : `已删除 ${deleted || 1} 个账号`, failed ? 'error' : 'success');
     await loadAccounts();
   }catch(e){
     toast('删除失败：' + e.message, 'error');
+  }
+}
+
+async function cleanupRequest(dryRun){
+  const r = await authedFetch('/api/accounts/cleanup', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dry_run:dryRun, zero_quota:$('cleanupZeroQuota').checked})
+  });
+  const d = await r.json();
+  if(!r.ok) throw new Error(errMsg(d));
+  return d;
+}
+
+function renderCleanupPreview(d){
+  const box = $('cleanupPreview');
+  const items = d.items || [];
+  if(!items.length){
+    box.style.display = 'block';
+    box.innerHTML = '没有发现需要清理的异常账号。';
+    return;
+  }
+  const rows = items.slice(0, 8).map(x => `${x.email || '-'} / ${x.status || '未知'} / 剩余额度 ${x.remaining ?? '-'} / ${x.token || ''}`);
+  const more = items.length > rows.length ? `<br>还有 ${items.length - rows.length} 个未显示。` : '';
+  box.style.display = 'block';
+  box.innerHTML = `<strong>将清理 ${items.length} 个账号：</strong><br>${rows.join('<br>')}${more}`;
+}
+
+async function previewCleanup(){
+  const btn = $('previewCleanupBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const d = await cleanupRequest(true);
+    renderCleanupPreview(d);
+    toast(`发现 ${d.count || 0} 个异常账号`, 'info');
+  }catch(e){
+    toast('预览失败：' + e.message, 'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
+async function cleanupAccounts(){
+  const btn = $('cleanupBtn');
+  btn.classList.add('loading'); btn.disabled = true;
+  try{
+    const preview = await cleanupRequest(true);
+    renderCleanupPreview(preview);
+    if(!preview.count){ toast('没有需要清理的异常账号', 'info'); return; }
+    if(!confirm(`确认清理 ${preview.count} 个异常账号吗？`)) return;
+    const d = await cleanupRequest(false);
+    if(!d.ok) throw new Error('上游删除失败');
+    toast(`已清理 ${d.deleted || 0} 个异常账号`, 'success');
+    await loadAccounts();
+  }catch(e){
+    toast('清理失败：' + e.message, 'error');
+  }finally{
+    btn.classList.remove('loading'); btn.disabled = false;
   }
 }
 
@@ -324,7 +453,7 @@ async function refreshAll(){
       body: JSON.stringify({tokens:[]})
     });
     const d = await r.json();
-    if(!r.ok){ throw new Error(d.detail?.error || d.error || '请求失败'); }
+    if(!r.ok){ throw new Error(errMsg(d)); }
     toast(`已同步 ${d.refreshed || 0} 个账号`, 'success');
     await loadAccounts();
   }catch(e){
@@ -356,14 +485,14 @@ async function loadUsers(){
   try{
     const r = await authedFetch('/api/users');
     const d = await r.json();
-    if(!r.ok) throw new Error(d.detail?.error||d.detail||'请求失败');
+    if(!r.ok) throw new Error(errMsg(d));
     const items = d.items||[];
     if(items.length===0){
       $('usersBox').innerHTML='<div class="empty">还没有用户密钥。在上方填用户名 → 创建。</div>';
       return;
     }
     let html='<div style="overflow-x:auto"><table><thead><tr>'
-      +'<th>用户名</th><th>密钥</th><th>状态</th><th>创建时间</th><th></th>'
+      +'<th>用户名</th><th>密钥</th><th>状态</th><th>创建时间</th><th>最后使用</th><th></th>'
       +'</tr></thead><tbody>';
     for(const u of items){
       const enabled = u.enabled !== false;
@@ -375,6 +504,7 @@ async function loadUsers(){
         </div></td>
         <td>${enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">禁用</span>'}</td>
         <td><span class="muted">${fmtCreated(u.created)}</span></td>
+        <td><span class="muted">${fmtCreated(u.last_used)}</span></td>
         <td><div class="actions">
           <button class="btn btn-secondary" onclick="toggleUser('${u.id}',${!enabled})" style="padding:5px 10px;font-size:.72rem">${enabled?'禁用':'启用'}</button>
           <button class="btn btn-danger" onclick="deleteUser('${u.id}','${(u.name||'').replace(/'/g,"\\'")}')">删除</button>
@@ -390,6 +520,7 @@ async function loadUsers(){
 
 async function createUser(){
   const name = $('newUserName').value.trim();
+  const key = $('newUserKey').value.trim();
   if(!name){ toast('请填用户名','error'); return; }
   const btn = $('createUserBtn');
   btn.classList.add('loading'); btn.disabled = true;
@@ -397,11 +528,12 @@ async function createUser(){
     const r = await authedFetch('/api/users',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name})
+      body: JSON.stringify({name, key})
     });
     const d = await r.json();
-    if(!r.ok) throw new Error(d.detail?.error||d.detail||'创建失败');
+    if(!r.ok) throw new Error(errMsg(d, '创建失败'));
     $('newUserName').value = '';
+    $('newUserKey').value = '';
     $('newKeyValue').textContent = d.key;
     $('newKeyAlert').style.display = 'block';
     toast(`已创建用户密钥：${d.name}`,'success');
@@ -418,7 +550,7 @@ async function deleteUser(id, name){
   try{
     const r = await authedFetch('/api/users/'+id,{method:'DELETE'});
     const d = await r.json();
-    if(!r.ok) throw new Error(d.detail?.error||d.detail||'删除失败');
+    if(!r.ok) throw new Error(errMsg(d, '删除失败'));
     toast('已删除','success');
     await loadUsers();
   }catch(e){
@@ -434,7 +566,7 @@ async function toggleUser(id, enabled){
       body: JSON.stringify({enabled})
     });
     const d = await r.json();
-    if(!r.ok) throw new Error(d.detail?.error||d.detail||'更新失败');
+    if(!r.ok) throw new Error(errMsg(d, '更新失败'));
     toast(enabled?'已启用':'已禁用','success');
     await loadUsers();
   }catch(e){
@@ -447,6 +579,7 @@ async function toggleUser(id, enabled){
   const ident = await ensureAuth(true);
   $('adminBadge').style.display = 'inline-block';
   $('adminBadge').textContent = `👑 ${ident.name}`;
+  await loadModeSettings();
   await loadRelaySettings();
   await loadAccounts();
   await loadUsers();

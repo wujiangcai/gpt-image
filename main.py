@@ -6,7 +6,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -91,6 +91,8 @@ def _identity_for(token: str) -> dict | None:
         return {"role": "admin", "name": "管理员", "id": "admin"}
     for u in data.get("users", []):
         if u.get("key") == token and u.get("enabled", True):
+            u["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            _save_auth(data)
             return {"role": "user", "name": u.get("name", ""), "id": u.get("id", "")}
     return None
 
@@ -132,6 +134,44 @@ class RelaySettingsBody(BaseModel):
     model: str = Field(default="gpt-image-2", min_length=1, max_length=120)
     api_key: str = Field(default="", max_length=1000)
     clear_key: bool = False
+
+
+class ModeSettingsBody(BaseModel):
+    mode: Literal["relay", "chat2api"]
+
+
+class CleanupAccountsBody(BaseModel):
+    statuses: list[str] = Field(default_factory=list)
+    zero_quota: bool = False
+    dry_run: bool = False
+
+
+def _normalize_mode(value: str) -> str:
+    mode = (value or "relay").strip().lower()
+    return mode if mode in {"relay", "chat2api"} else "relay"
+
+
+def _current_mode() -> str:
+    return _normalize_mode((_load_auth().get("settings") or {}).get("mode") or MODE)
+
+
+def _public_mode_config() -> dict:
+    relay = _public_relay_config()
+    return {
+        "mode": _current_mode(),
+        "relay_ready": bool(relay["base_url"] and relay["key_loaded"]),
+        "account_pool_ready": bool(CHAT_KEY),
+        "c2a_admin": bool(C2A_BASE and C2A_KEY),
+    }
+
+
+def _save_mode_config(body: ModeSettingsBody) -> dict:
+    data = _load_auth()
+    settings = data.get("settings") or {}
+    settings["mode"] = body.mode
+    data["settings"] = settings
+    _save_auth(data)
+    return _public_mode_config()
 
 
 def _normalize_url(value: str) -> str:
@@ -303,7 +343,7 @@ async def generate_via_chat2api(req: GenerateRequest):
 
 @app.post("/api/generate")
 async def generate(req: GenerateRequest, _: dict = Depends(require_user)):
-    if MODE == "chat2api":
+    if _current_mode() == "chat2api":
         return await generate_via_chat2api(req)
     return await generate_via_relay(req)
 
@@ -316,7 +356,7 @@ async def edits(
     n: Annotated[int, Form()] = 1,
     _: dict = Depends(require_user),
 ):
-    if MODE == "chat2api":
+    if _current_mode() == "chat2api":
         # chat2api supports multimodal upload via different mechanism — not implemented yet
         raise HTTPException(501, "Image edits via chat2api mode not implemented yet — use relay mode for /edits")
 
@@ -337,14 +377,15 @@ async def edits(
 @app.get("/api/health")
 async def health():
     relay = _public_relay_config()
+    mode = _current_mode()
     return {
         "ok": True,
-        "mode": MODE,
-        "model": relay["model"] if MODE == "relay" else MODEL,
-        "relay_base": relay["base_url"] if MODE == "relay" else None,
-        "chat_base": CHAT_BASE if MODE == "chat2api" else None,
+        "mode": mode,
+        "model": relay["model"] if mode == "relay" else MODEL,
+        "relay_base": relay["base_url"] if mode == "relay" else None,
+        "chat_base": CHAT_BASE if mode == "chat2api" else None,
         "proxy": PROXY,
-        "key_loaded": relay["key_loaded"] if MODE == "relay" else bool(CHAT_KEY),
+        "key_loaded": relay["key_loaded"] if mode == "relay" else bool(CHAT_KEY),
         "c2a_admin": bool(C2A_BASE and C2A_KEY),
     }
 
@@ -359,6 +400,16 @@ async def update_relay_settings(body: RelaySettingsBody, _: dict = Depends(requi
     return _save_relay_config(body)
 
 
+@app.get("/api/settings/mode")
+async def get_mode_settings(_: dict = Depends(require_admin)):
+    return _public_mode_config()
+
+
+@app.put("/api/settings/mode")
+async def update_mode_settings(body: ModeSettingsBody, _: dict = Depends(require_admin)):
+    return _save_mode_config(body)
+
+
 # ---------- chatgpt2api account-management proxy ----------
 
 class TokenListBody(BaseModel):
@@ -370,7 +421,7 @@ def _ensure_c2a():
         raise HTTPException(500, "C2A_BASE / C2A_KEY not configured (.env)")
 
 
-async def _c2a_request(method: str, path: str, *, json_body: dict | None = None) -> JSONResponse:
+async def _c2a_raw_request(method: str, path: str, *, json_body: dict | None = None) -> tuple[int, dict]:
     _ensure_c2a()
     url = f"{C2A_BASE}{path}"
     headers = {"Authorization": f"Bearer {C2A_KEY}", "Content-Type": "application/json"}
@@ -379,7 +430,124 @@ async def _c2a_request(method: str, path: str, *, json_body: dict | None = None)
             r = await client.request(method, url, headers=headers, json=json_body)
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Upstream c2a error: {e}")
-    return JSONResponse(status_code=r.status_code, content=_safe_json(r))
+    return r.status_code, _safe_json(r)
+
+
+async def _c2a_request(method: str, path: str, *, json_body: dict | None = None) -> JSONResponse:
+    status, content = await _c2a_raw_request(method, path, json_body=json_body)
+    return JSONResponse(status_code=status, content=content)
+
+
+def _mask_token(token: str) -> str:
+    if len(token) <= 16:
+        return "***"
+    return f"{token[:8]}…{token[-6:]}"
+
+
+def _redact_c2a_response(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if key.lower() in {"access_token", "token", "tokens"}:
+                if isinstance(item, list):
+                    redacted[key] = [_mask_token(str(t)) for t in item]
+                elif isinstance(item, str):
+                    redacted[key] = _mask_token(item)
+                else:
+                    redacted[key] = "***"
+            else:
+                redacted[key] = _redact_c2a_response(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_c2a_response(item) for item in value]
+    return value
+
+
+def _response_deleted_count(data: dict) -> int:
+    for key in ("deleted", "removed", "success", "count"):
+        value = data.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+    items = data.get("items") or data.get("deleted_items") or []
+    return len(items) if isinstance(items, list) else 0
+
+
+def _delete_failed(status: int, data: dict) -> bool:
+    if status in {400, 404, 405, 422}:
+        return True
+    if status >= 500:
+        return False
+    if status >= 400:
+        return True
+    if data.get("ok") is True:
+        return False
+    if data.get("ok") is False:
+        return True
+    return _response_deleted_count(data) == 0
+
+
+async def _delete_c2a_accounts(tokens: list[str]) -> dict:
+    attempts = []
+    for method, path in (("DELETE", "/api/accounts"), ("POST", "/api/accounts/remove"), ("POST", "/api/accounts/delete")):
+        status, data = await _c2a_raw_request(method, path, json_body={"tokens": tokens})
+        attempts.append({"method": method, "path": path, "status": status, "response": data})
+        if not _delete_failed(status, data):
+            deleted = _response_deleted_count(data) or len(tokens)
+            return {
+                "ok": True,
+                "deleted": deleted,
+                "failed": max(len(tokens) - deleted, 0),
+                "tokens": [_mask_token(t) for t in tokens],
+                "upstream": {"method": method, "path": path, "status": status, "response": _redact_c2a_response(data)},
+            }
+        if status not in {400, 404, 405, 422} and status < 500:
+            break
+    last = attempts[-1]
+    return {
+        "ok": False,
+        "deleted": 0,
+        "failed": len(tokens),
+        "tokens": [_mask_token(t) for t in tokens],
+        "upstream": {**last, "response": _redact_c2a_response(last.get("response"))},
+    }
+
+
+def _image_remaining(item: dict) -> int | None:
+    for progress in item.get("limits_progress") or []:
+        if progress.get("feature_name") == "image_gen":
+            remaining = progress.get("remaining")
+            return remaining if isinstance(remaining, int) else None
+    quota = item.get("quota")
+    return quota if isinstance(quota, int) else None
+
+
+def _is_normal_account(item: dict) -> bool:
+    status = str(item.get("status") or "").strip().lower()
+    return status in {"normal", "正常"}
+
+
+def _cleanup_candidate(item: dict, body: CleanupAccountsBody) -> bool:
+    token = str(item.get("access_token") or "").strip()
+    if not token:
+        return False
+    status = str(item.get("status") or "").strip()
+    if body.statuses and status in body.statuses:
+        return True
+    if not body.statuses and not _is_normal_account(item):
+        return True
+    return bool(body.zero_quota and _image_remaining(item) == 0)
+
+
+def _account_summary(item: dict) -> dict:
+    token = str(item.get("access_token") or "")
+    return {
+        "email": item.get("email") or "-",
+        "status": item.get("status") or "未知",
+        "remaining": _image_remaining(item),
+        "token": _mask_token(token) if token else "",
+    }
 
 
 @app.get("/api/accounts")
@@ -400,7 +568,26 @@ async def remove_accounts(body: TokenListBody, _: dict = Depends(require_admin))
     tokens = [t.strip() for t in body.tokens if t and t.strip()]
     if not tokens:
         raise HTTPException(400, "tokens is required")
-    return await _c2a_request("DELETE", "/api/accounts", json_body={"tokens": tokens})
+    result = await _delete_c2a_accounts(tokens)
+    return JSONResponse(status_code=200 if result["ok"] else 502, content=result)
+
+
+@app.post("/api/accounts/cleanup")
+async def cleanup_accounts(body: CleanupAccountsBody, _: dict = Depends(require_admin)):
+    status, data = await _c2a_raw_request("GET", "/api/accounts")
+    if status >= 400:
+        return JSONResponse(status_code=status, content=data)
+    items = data.get("items") or []
+    candidates = [item for item in items if isinstance(item, dict) and _cleanup_candidate(item, body)]
+    tokens = [str(item.get("access_token") or "").strip() for item in candidates]
+    summaries = [_account_summary(item) for item in candidates]
+    if body.dry_run:
+        return {"ok": True, "dry_run": True, "count": len(tokens), "items": summaries}
+    if not tokens:
+        return {"ok": True, "dry_run": False, "count": 0, "deleted": 0, "items": []}
+    result = await _delete_c2a_accounts(tokens)
+    result.update({"dry_run": False, "count": len(tokens), "items": summaries})
+    return JSONResponse(status_code=200 if result["ok"] else 502, content=result)
 
 
 @app.post("/api/accounts/refresh")
@@ -413,6 +600,7 @@ async def refresh_accounts(body: TokenListBody, _: dict = Depends(require_admin)
 
 class UserCreateBody(BaseModel):
     name: str = Field(default="", max_length=80)
+    key: str = Field(default="", max_length=200)
 
 
 class UserPatchBody(BaseModel):
@@ -445,10 +633,13 @@ async def list_users(_: dict = Depends(require_admin)):
 @app.post("/api/users")
 async def create_user(body: UserCreateBody, _: dict = Depends(require_admin)):
     data = _load_auth()
+    key = body.key.strip() or _gen_key("sk-app")
+    if key == data.get("admin_token") or any(u.get("key") == key for u in data.get("users", [])):
+        raise HTTPException(400, "key already exists")
     user = {
         "id": secrets.token_hex(8),
         "name": (body.name or "未命名").strip()[:80],
-        "key": _gen_key("sk-app"),
+        "key": key,
         "enabled": True,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "last_used": None,

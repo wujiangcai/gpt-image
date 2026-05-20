@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git config *)",
+      "Bash(git push *)",
+      "Bash(curl *)",
+      "Bash(powershell.exe *)",
+      "Bash(env)",
+      "Bash(git *)",
+      "Bash(python *)",
+      "mcp__filesystem__read_text_file",
+      "PowerShell(python -m py_compile main.py)",
+      "PowerShell($env:PORT='8000'; python main.py)",
+      "PowerShell($env:PORT='8000'; & \".venv\\\\Scripts\\\\python.exe\" main.py)",
+      "mcp__playwright__browser_navigate",
+      "mcp__filesystem__create_directory",
+      "PowerShell(python -m py_compile main.py tests\\\\test_admin_features.py)",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" -m unittest tests.test_admin_features)",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" -m py_compile main.py tests\\\\test_admin_features.py)"
+    ]
+  }
+}

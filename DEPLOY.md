@@ -133,9 +133,11 @@ http://<VPS_IP>:8080
 应该看到登录框 → 粘贴你刚才生成的 `ADMIN_TOKEN` → 登录成功 → 进画图主页。
 
 去 `http://<VPS_IP>:8080/admin`：
-1. 在「中转站生图设置」里填写中转站图片 API 路径（例如 `https://your-relay.com/v1/images`）、模型（例如 `gpt-image-2`）和 API Key，保存后无需重启。
-2. 如使用内置 chatgpt2api 号池，继续添加 ChatGPT access_token → 看到额度。
-3. 在「用户密钥管理」创建用户密钥 → 把密钥发给同事。
+1. 在「生图来源」选择 `中转站 Relay` 或 `账号池 ChatGPT`，保存后无需重启。
+2. 在「中转站生图设置」里填写中转站图片 API 路径（例如 `https://your-relay.com/v1/images`）、模型（例如 `gpt-image-2`）和 API Key。
+3. 如使用内置 chatgpt2api 号池，继续添加 ChatGPT access_token → 看到额度。
+4. 在「当前账号池」可先点「预览异常账号」，确认后点「清理异常账号」批量移除异常账号；需要清理零额度账号时勾选「包含零额度」。
+5. 在「用户密钥管理」创建用户密钥 → 把密钥发给同事。
 
 ---
 
@@ -185,11 +187,12 @@ docker compose up -d --build image-gen-demo
 - `curl http://localhost:8080/api/health` VPS 自己能不能通
 
 **Q：admin 登录后画图 502 / 出错**
-- 先检查 `/admin` →「中转站生图设置」里的 API 路径是否包含 `/v1/images`，模型名是否为中转商支持的值
+- 先检查 `/admin` →「生图来源」当前选的是 `中转站 Relay` 还是 `账号池 ChatGPT`
+- 走中转站时，检查「中转站生图设置」里的 API 路径是否包含 `/v1/images`，模型名是否为中转商支持的值
 - 中转商 key 错误通常会返回 401/403
 - chatgpt2api 容器日志：`docker compose logs chatgpt2api`
 - 如果走内置号池，可能没加 access_token，去 admin 加一个
-- access_token 可能失效（10 天有效期），admin 删旧加新
+- access_token 可能失效（10 天有效期），admin 删旧加新；删不掉或异常账号多时，用「预览异常账号」和「清理异常账号」批量处理
 
 **Q：chatgpt2api 连不上 chatgpt.com**
 - 旧金山 VPS 一般直连没问题
