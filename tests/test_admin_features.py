@@ -110,6 +110,113 @@ class AdminFeatureTests(unittest.TestCase):
             self.assertEqual(data["count"], 2)
             self.assertEqual(set(deleted), {"bad-token-1234567890", "zero-token-1234567890"})
             self.assertNotIn("zero-token-1234567890", json.dumps(data, ensure_ascii=False))
+    def test_generate_maps_upstream_auth_failure_without_logging_out_user(self):
+        class FakeResponse:
+            status_code = 401
+            text = '{"error":{"message":"bad upstream key"}}'
+
+            def json(self):
+                return {"error": {"message": "bad upstream key"}}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "test image", "size": "1024x1024", "n": 1},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(r.json()["upstream_status"], 401)
+
+    def test_edits_validates_upload_and_sends_single_image_field(self):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"abc"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "abc"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                captured["files"] = files
+                captured["data"] = data
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/edits",
+                data={"prompt": "edit this", "size": "1024x1024", "n": "1"},
+                files={"image": ("ref.png", b"png-bytes", "image/png")},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("image", captured["files"])
+        self.assertNotIn("image[]", captured["files"])
+        self.assertEqual(captured["data"]["n"], "1")
+
+        r = self.client.post(
+            "/api/edits",
+            data={"prompt": "edit this", "size": "1024x1024", "n": "1"},
+            files={"image": ("ref.txt", b"not an image", "text/plain")},
+            headers=self.headers,
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_edits_accepts_generic_upload_content_type(self):
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"abc"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "abc"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/edits",
+                data={"prompt": "edit this", "size": "1024x1024", "n": "1"},
+                files={"image": ("ref.png", b"png-bytes", "application/octet-stream")},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
 
 
 if __name__ == "__main__":

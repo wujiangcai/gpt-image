@@ -1,5 +1,6 @@
 import base64
 import json
+import math
 import os
 import re
 import secrets
@@ -20,6 +21,8 @@ load_dotenv()
 MODE = os.getenv("MODE", "relay").lower()
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "180"))
 MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+MAX_EDIT_IMAGE_BYTES = int(os.getenv("MAX_EDIT_IMAGE_BYTES", str(10 * 1024 * 1024)))
+EDIT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 # Relay mode (existing): forward OpenAI Images API to a real OpenAI-compatible endpoint
 RELAY_BASE = os.getenv("IMAGE_API_BASE", "https://api.openai.com/v1/images").rstrip("/")
@@ -247,6 +250,12 @@ def extract_image_urls(markdown: str) -> list:
 
 # ---------- relay mode (legacy, for otokapi / OpenAI official) ----------
 
+def _upstream_error_status(status_code: int) -> int:
+    # Keep local 401/403 reserved for this app's login state. If an upstream API
+    # rejects its hidden key, the browser token is still valid and should not be cleared.
+    return 502 if status_code in {401, 403} else status_code
+
+
 async def generate_via_relay(req: GenerateRequest):
     cfg = _require_relay_config()
 
@@ -263,7 +272,7 @@ async def generate_via_relay(req: GenerateRequest):
 
     if r.status_code >= 400:
         return JSONResponse(
-            status_code=r.status_code,
+            status_code=_upstream_error_status(r.status_code),
             content={"error": _safe_json(r), "upstream_status": r.status_code},
         )
     return r.json()
@@ -295,7 +304,7 @@ async def generate_via_chat2api(req: GenerateRequest):
 
     if r.status_code >= 400:
         return JSONResponse(
-            status_code=r.status_code,
+            status_code=_upstream_error_status(r.status_code),
             content={"error": _safe_json(r), "upstream_status": r.status_code, "stage": "chat_completion"},
         )
 
@@ -348,6 +357,20 @@ async def generate(req: GenerateRequest, _: dict = Depends(require_user)):
     return await generate_via_relay(req)
 
 
+async def _read_edit_image(image: UploadFile) -> bytes:
+    content = await image.read(MAX_EDIT_IMAGE_BYTES + 1)
+    if not content:
+        raise HTTPException(400, "参考图不能为空")
+    if len(content) > MAX_EDIT_IMAGE_BYTES:
+        max_mb = MAX_EDIT_IMAGE_BYTES / (1024 * 1024)
+        limit = f"{math.ceil(MAX_EDIT_IMAGE_BYTES / 1024)}KB" if max_mb < 1 else f"{max_mb:g}MB"
+        raise HTTPException(413, f"参考图不能超过 {limit}")
+    content_type = (image.content_type or "").lower()
+    if content_type and content_type != "application/octet-stream" and content_type not in EDIT_IMAGE_TYPES:
+        raise HTTPException(400, "参考图仅支持 PNG、JPG、WEBP")
+    return content
+
+
 @app.post("/api/edits")
 async def edits(
     prompt: Annotated[str, Form()],
@@ -360,9 +383,13 @@ async def edits(
         # chat2api supports multimodal upload via different mechanism — not implemented yet
         raise HTTPException(501, "Image edits via chat2api mode not implemented yet — use relay mode for /edits")
 
+    if n < 1 or n > 4:
+        raise HTTPException(400, "n must be between 1 and 4")
+
     cfg = _require_relay_config()
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
-    files = {"image[]": (image.filename or "ref.png", await image.read(), image.content_type or "image/png")}
+    content = await _read_edit_image(image)
+    files = {"image": (image.filename or "ref.png", content, image.content_type or "image/png")}
     data = {"model": cfg["model"], "prompt": prompt, "size": size, "n": str(n)}
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
@@ -370,7 +397,10 @@ async def edits(
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Upstream connection error: {e}")
     if r.status_code >= 400:
-        return JSONResponse(status_code=r.status_code, content={"error": _safe_json(r), "upstream_status": r.status_code})
+        return JSONResponse(
+            status_code=_upstream_error_status(r.status_code),
+            content={"error": _safe_json(r), "upstream_status": r.status_code},
+        )
     return r.json()
 
 
@@ -386,6 +416,7 @@ async def health():
         "chat_base": CHAT_BASE if mode == "chat2api" else None,
         "proxy": PROXY,
         "key_loaded": relay["key_loaded"] if mode == "relay" else bool(CHAT_KEY),
+        "edits_supported": mode == "relay",
         "c2a_admin": bool(C2A_BASE and C2A_KEY),
     }
 

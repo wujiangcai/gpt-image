@@ -115,6 +115,14 @@ API Key: 中转商给的 key
 
 也可以修改 `.env` 作为默认值，然后重启服务；但一旦 `/admin` 保存过配置，运行时会优先使用 `_auth.json` 里的管理员配置。
 
+## 重度生图使用说明
+
+- 管理员 token 和 `sk-app-*` 用户密钥都可以登录首页生图；只有管理员 token 能访问 `/admin`。
+- 如果上游中转站 API key 失效或被拒绝，前端不会再把当前登录密钥误判为失效。页面会显示生成失败，上游状态保存在响应里的 `upstream_status` 字段中。
+- 参考图只在 `relay` 模式可用。`chat2api` 模式下首页会提示当前模式暂不支持参考图，并阻止带参考图请求。
+- 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。
+- 历史记录只保存 prompt、尺寸、数量、时间和是否含参考图，不再保存完整 base64 图片，避免高频生图时撑爆浏览器 `localStorage`。点击历史记录会恢复提示词和尺寸；旧历史里如果还带有图片数据，仍会显示旧图。
+
 ## 本地验证
 
 ```bash
@@ -122,13 +130,13 @@ python -m py_compile main.py tests/test_admin_features.py
 .venv\Scripts\python.exe -m unittest tests.test_admin_features
 ```
 
-`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、异常账号预览/清理与 token 脱敏。
+`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、异常账号预览/清理与 token 脱敏、上游认证失败状态映射、参考图上传字段和后端校验。
 
 ## 常见错误排查
 
 页面顶部红条显示 `中转站 API key 未配置` → 用管理员 token 登录 `/admin`，在「中转站生图设置」里填写 API Key；或检查 `.env` 的 `IMAGE_API_KEY`。
 
-生成时 `[401] Unauthorized` → key 错了，或者中转商认证方式不是 `Bearer`（需要改 main.py 的 headers）。
+`[502] 上游认证失败 / upstream_status: 401 或 403` → 登录密钥是有效的，但中转站或 ChatGPT 上游 key 被拒绝。去 `/admin` 检查中转站 API Key、路径和模型。
 
 `[404] Not Found` → base URL 路径错了，常见错误：少了 `/v1/images`，或多带了末尾斜杠（代码会去掉斜杠，但路径段错了无法挽救）。
 

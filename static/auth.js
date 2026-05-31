@@ -12,12 +12,14 @@ async function authedFetch(url, opts = {}) {
   return fetch(url, { ...opts, headers });
 }
 
-async function checkAuth() {
-  if (!getToken()) return null;
+async function checkAuth(token = getToken()) {
+  if (!token) return null;
   try {
-    const r = await authedFetch('/api/auth/check', { method: 'POST' });
+    const headers = new Headers();
+    headers.set('Authorization', 'Bearer ' + token);
+    const r = await fetch('/api/auth/check', { method: 'POST', headers });
     if (!r.ok) {
-      if (r.status === 401) clearToken();
+      if (token === getToken() && (r.status === 401 || r.status === 403)) clearToken();
       return null;
     }
     return await r.json();
@@ -50,13 +52,13 @@ function showLoginPanel(opts = {}) {
     const t = input.value.trim();
     if (!t) { err.style.color = '#f87171'; err.textContent = '请输入 token'; return; }
     err.style.color = '#8888a0'; err.textContent = '验证中…';
-    setToken(t);
-    const id = await checkAuth();
-    if (!id) { err.style.color = '#f87171'; err.textContent = 'token 无效或已被禁用'; return; }
+    const id = await checkAuth(t);
+    if (!id) { err.style.color = '#f87171'; err.textContent = 'token 无效或已被禁用'; clearToken(); return; }
     if (adminOnly && id.role !== 'admin') {
       err.style.color = '#f87171'; err.textContent = '该 token 不是管理员，无法访问';
       clearToken(); return;
     }
+    setToken(t);
     panel.remove();
     if (typeof opts.onSuccess === 'function') opts.onSuccess(id);
     else location.reload();

@@ -152,6 +152,7 @@ const REF_IMAGE_TYPES=new Set(['image/png','image/jpeg','image/webp']);
 let generating=false;
 let refImageBase64=null;
 let refImageFile=null;
+let editsSupported=false;
 
 // 鉴权 + 启动初始化
 (async()=>{
@@ -165,13 +166,16 @@ let refImageFile=null;
       el.className='config-info err';
       el.innerHTML='⚠ 中转站 API key 未配置，请管理员进入 <code>/admin</code> 设置 API 路径、key 和模型';
     }else{
+      editsSupported = d.edits_supported !== false;
       const endpoint = d.mode === 'relay' ? d.relay_base : d.chat_base;
-      el.innerHTML=`后端代理已就绪<br>Mode: <code>${d.mode}</code> · Model: <code>${d.model}</code>${endpoint ? ` · API: <code>${endpoint}</code>` : ''}`;
+      const editsHint = editsSupported ? '' : '<br>当前模式暂不支持参考图，请移除参考图后生成';
+      el.innerHTML=`后端代理已就绪<br>Mode: <code>${d.mode}</code> · Model: <code>${d.model}</code>${endpoint ? ` · API: <code>${endpoint}</code>` : ''}${editsHint}`;
     }
   }).catch(()=>{
+    editsSupported=false;
     const el=document.getElementById('configInfo');
     el.className='config-info err';
-    el.textContent='无法连接到后端 /api/health';
+    el.textContent='无法连接到后端 /api/health，参考图功能已暂时禁用';
   });
 })();
 
@@ -301,6 +305,8 @@ async function generate(){
   const size=document.getElementById('size').value;
   const fullPrompt=style?`${prompt}, ${style}`:prompt;
 
+  if(refImageFile && !editsSupported){showStatus('当前模式暂不支持参考图，请移除参考图后再生成','danger');return}
+
   generating=true;
   const btn=document.getElementById('generateBtn');
   btn.disabled=true;
@@ -398,12 +404,9 @@ function copyBase64(src){
 
 function saveHistory(prompt,size,images,hasRef){
   const history=JSON.parse(localStorage.getItem('imgGenHistory')||'[]');
-  history.unshift({prompt,size,images:images.map(s=>s.substring(0,200)),fullImages:images,time:new Date().toLocaleString(),hasRef});
-  if(history.length>20)history.length=20;
-  try{localStorage.setItem('imgGenHistory',JSON.stringify(history))}catch(e){
-    history.forEach(h=>delete h.fullImages);
-    try{localStorage.setItem('imgGenHistory',JSON.stringify(history))}catch(e2){}
-  }
+  history.unshift({prompt,size,count:images.length,time:new Date().toLocaleString(),hasRef});
+  if(history.length>50)history.length=50;
+  try{localStorage.setItem('imgGenHistory',JSON.stringify(history))}catch(e){}
   renderHistory();
 }
 
@@ -411,7 +414,7 @@ function renderHistory(){
   const history=JSON.parse(localStorage.getItem('imgGenHistory')||'[]');
   const el=document.getElementById('history');
   if(!history.length){el.innerHTML='<p style="font-size:.8rem;color:var(--text2);text-align:center;padding:12px">暂无记录</p>';return}
-  el.innerHTML=history.map((h,i)=>`<div class="history-item" onclick="reuse(${i})"><div style="width:48px;height:48px;border-radius:6px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0">${h.hasRef?'🖼+':'🖼'}</div><div class="info"><p>${escapeHtml(h.prompt)}</p><span>${escapeHtml(h.size||'')} · ${escapeHtml(h.time||'')}${h.hasRef?' · 含参考图':''}</span></div></div>`).join('');
+  el.innerHTML=history.map((h,i)=>`<div class="history-item" onclick="reuse(${i})"><div style="width:48px;height:48px;border-radius:6px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0">${h.hasRef?'🖼+':'🖼'}</div><div class="info"><p>${escapeHtml(h.prompt)}</p><span>${escapeHtml(h.size||'')} · ${escapeHtml(h.time||'')}${h.count?` · ${h.count}张`:''}${h.hasRef?' · 含参考图':''}</span></div></div>`).join('');
 }
 
 function reuse(idx){
@@ -423,6 +426,9 @@ function reuse(idx){
     document.getElementById('imagesGrid').innerHTML='';
     history[idx].fullImages.forEach((src,i)=>addImageCard(src,i));
     document.getElementById('outputTitle').textContent='历史记录';
+  }else{
+    document.getElementById('outputTitle').textContent='历史记录（仅保存提示词）';
+    showStatus('已恢复历史提示词；为避免占满浏览器存储，历史记录不再保存原图','info');
   }
 }
 
