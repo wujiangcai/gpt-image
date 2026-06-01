@@ -169,7 +169,7 @@ class AdminFeatureTests(unittest.TestCase):
         with patch.object(self.main.httpx, "AsyncClient", FakeClient):
             r = self.client.post(
                 "/api/edits",
-                data={"prompt": "edit this", "size": "1024x1024", "n": "1"},
+                data={"prompt": "edit this", "size": "1024x1024", "n": "2", "quality": "high"},
                 files={"image": ("ref.png", b"png-bytes", "image/png")},
                 headers=self.headers,
             )
@@ -177,7 +177,8 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("image", captured["files"])
         self.assertNotIn("image[]", captured["files"])
-        self.assertEqual(captured["data"]["n"], "1")
+        self.assertEqual(captured["data"]["n"], "2")
+        self.assertEqual(captured["data"]["quality"], "high")
 
         r = self.client.post(
             "/api/edits",
@@ -186,6 +187,44 @@ class AdminFeatureTests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(r.status_code, 400)
+
+    def test_generate_relay_forwards_count_and_quality(self):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"abc"},{"b64_json":"def"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "abc"}, {"b64_json": "def"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                captured["url"] = url
+                captured["json"] = json
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "test image", "size": "1536x1024", "n": 4, "quality": "high"},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured["url"], "https://relay.example/v1/images/generations")
+        self.assertEqual(captured["json"]["n"], 4)
+        self.assertEqual(captured["json"]["quality"], "high")
+        self.assertEqual(captured["json"]["size"], "1536x1024")
 
     def test_edits_accepts_generic_upload_content_type(self):
         class FakeResponse:

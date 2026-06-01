@@ -377,6 +377,7 @@ async def edits(
     image: Annotated[UploadFile, File()],
     size: Annotated[str, Form()] = "1024x1024",
     n: Annotated[int, Form()] = 1,
+    quality: Annotated[str | None, Form()] = None,
     _: dict = Depends(require_user),
 ):
     if _current_mode() == "chat2api":
@@ -391,6 +392,8 @@ async def edits(
     content = await _read_edit_image(image)
     files = {"image": (image.filename or "ref.png", content, image.content_type or "image/png")}
     data = {"model": cfg["model"], "prompt": prompt, "size": size, "n": str(n)}
+    if quality:
+        data["quality"] = quality
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
             r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)

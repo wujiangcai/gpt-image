@@ -118,19 +118,25 @@ API Key: 中转商给的 key
 ## 重度生图使用说明
 
 - 管理员 token 和 `sk-app-*` 用户密钥都可以登录首页生图；只有管理员 token 能访问 `/admin`。
+- 首页支持两种任务模式：`单条` 适合反复打磨一个 prompt，`多行批量` 会把文本框里的每一行当作一个独立 prompt 排队生成。
+- `每个 prompt 出图` 会直接传给上游的 `n` 参数，一次请求最多 4 张；多行批量时总出图数 = prompt 行数 × 每行数量，失败任务会保留在页面上并支持单独或批量重试。
+- `质量` 会透传为上游图片接口的 `quality` 参数；不确定中转商是否支持时选 `默认`，避免额外参数导致 400。
+- 结果区支持单图下载、复用该图 prompt、复制图片地址/base64，以及 `下载全部`。批量下载使用浏览器下载能力，浏览器可能会询问是否允许多个文件下载。
+- 历史记录保存 prompt 列表、尺寸、数量、质量、风格、成功/失败数量和是否含参考图，不保存完整图片数据，避免高频生图时撑爆浏览器 `localStorage`。
 - 如果上游中转站 API key 失效或被拒绝，前端不会再把当前登录密钥误判为失效。页面会显示生成失败，上游状态保存在响应里的 `upstream_status` 字段中。
 - 参考图只在 `relay` 模式可用。`chat2api` 模式下首页会提示当前模式暂不支持参考图，并阻止带参考图请求。
-- 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。
-- 历史记录只保存 prompt、尺寸、数量、时间和是否含参考图，不再保存完整 base64 图片，避免高频生图时撑爆浏览器 `localStorage`。点击历史记录会恢复提示词和尺寸；旧历史里如果还带有图片数据，仍会显示旧图。
+- 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。参考图模式同样支持 `n` 和 `quality` 透传。
 
 ## 本地验证
 
 ```bash
 python -m py_compile main.py tests/test_admin_features.py
 .venv\Scripts\python.exe -m unittest tests.test_admin_features
+node --check static/auth.js
+node -e "const fs=require('fs'); const html=fs.readFileSync('static/index.html','utf8'); const scripts=[]; let rest=html; while(true){ const a=rest.indexOf('<script>'); if(a<0) break; const b=rest.indexOf('</script>', a); scripts.push(rest.slice(a+8,b)); rest=rest.slice(b+9); } for (const s of scripts) new Function(s); console.log('inline scripts ok:', scripts.length);"
 ```
 
-`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、异常账号预览/清理与 token 脱敏、上游认证失败状态映射、参考图上传字段和后端校验。
+`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、异常账号预览/清理与 token 脱敏、上游认证失败状态映射、纯文本生成的 `n`/`quality` 转发、参考图上传字段和后端校验。
 
 ## 常见错误排查
 
