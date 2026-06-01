@@ -75,6 +75,7 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
 .config-info.err{color:var(--danger);border-color:rgba(251,113,133,.35)}
 .ref-upload-area{border:1px dashed var(--border);border-radius:8px;padding:14px;text-align:center;cursor:pointer;transition:all .15s;background:var(--surface2);position:relative;min-height:104px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px}
 .ref-upload-area:hover,.ref-upload-area.dragover{border-color:var(--accent);background:rgba(79,184,168,.08)}
+.ref-upload-area.disabled{opacity:.52;cursor:not-allowed;border-style:solid}
 .ref-upload-area svg{width:30px;height:30px;opacity:.55}
 .ref-upload-area p{font-size:.8rem;color:var(--text)}
 .ref-upload-area .hint{font-size:.72rem;color:var(--text2)}
@@ -88,6 +89,7 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
 .ref-preview-wrap .ref-info{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.82));padding:14px 10px 8px;font-size:.72rem;color:#fff}
 #status{font-size:.84rem;color:var(--text2);text-align:center;min-height:20px;line-height:1.4}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@media (hover:none){.img-card{display:flex;flex-direction:column}.img-card .actions{position:static;opacity:1;background:var(--surface3);padding:8px}.img-card .actions button{background:var(--surface2);color:var(--text);border-color:var(--border)}}
 ::-webkit-scrollbar{width:7px;height:7px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
 </style>
 </head>
@@ -205,6 +207,7 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
         <div id="runMeta" class="run-meta"></div>
       </div>
       <div class="output-actions">
+        <button class="btn btn-secondary" id="stopBtn" onclick="stopGeneration()" style="display:none">停止</button>
         <button class="btn btn-secondary" id="retryFailedBtn" onclick="retryFailedTasks()" style="display:none">重试失败</button>
         <button class="btn btn-secondary" id="downloadAllBtn" onclick="downloadAllImages()" style="display:none">下载全部</button>
       </div>
@@ -238,6 +241,9 @@ let currentResults=[];
 let failedTasks=[];
 let lastRunConfig=null;
 let activeLightboxSrc='';
+let activeController=null;
+let stopRequested=false;
+let healthLoaded=false;
 
 const $=id=>document.getElementById(id);
 const refUploadArea=$('refUploadArea');
@@ -256,11 +262,15 @@ const refFileInput=$('refFileInput');
 
 async function loadHealth(){
   try{
-    const d=await fetch(HEALTH_API_URL).then(r=>r.json());
+    const res=await authedFetch(HEALTH_API_URL);
+    const d=await res.json();
+    if(!res.ok)throw new Error(d?.detail||`HTTP ${res.status}`);
     const el=$('configInfo');
     if(!d.key_loaded){
       el.className='config-info err';
       el.innerHTML='中转站 API key 未配置，请管理员进入 <code>/admin</code> 设置 API 路径、key 和模型';
+      healthLoaded=true;
+      setRefUploadEnabled(false);
       return;
     }
     editsSupported=d.edits_supported!==false;
@@ -268,16 +278,29 @@ async function loadHealth(){
     const editsHint=editsSupported?'':'<br>当前模式暂不支持参考图，请移除参考图后生成';
     el.className='config-info';
     el.innerHTML=`后端代理已就绪<br>Mode: <code>${escapeHtml(d.mode)}</code> · Model: <code>${escapeHtml(d.model)}</code>${endpoint?` · API: <code>${escapeHtml(endpoint)}</code>`:''}${editsHint}`;
+    healthLoaded=true;
+    setRefUploadEnabled(editsSupported);
   }catch(e){
     editsSupported=false;
+    healthLoaded=true;
+    setRefUploadEnabled(false);
     const el=$('configInfo');
     el.className='config-info err';
     el.textContent='无法连接到后端 /api/health，参考图功能已暂时禁用';
   }
 }
 
+function setRefUploadEnabled(enabled){
+  refUploadArea.classList.toggle('disabled',!enabled);
+  refUploadArea.setAttribute('aria-disabled',enabled?'false':'true');
+}
+
 function openRefPicker(e){
   if(e)e.stopPropagation();
+  if(healthLoaded&&!editsSupported){
+    showStatus('当前模式暂不支持参考图，请在管理员页切换到 relay 模式','danger');
+    return;
+  }
   refFileInput.value='';
   refFileInput.click();
 }
@@ -317,6 +340,7 @@ document.addEventListener('paste',e=>{
 });
 
 function handleRefFile(file){
+  if(!editsSupported){showStatus('当前模式暂不支持参考图，请在管理员页切换到 relay 模式','danger');return}
   if(!file){showStatus('请选择图片文件','danger');return}
   if(!REF_IMAGE_TYPES.has(file.type)){showStatus('参考图仅支持 PNG、JPG、WEBP','danger');return}
   if(file.size===0){showStatus('图片文件为空，请重新选择','danger');return}
@@ -405,6 +429,12 @@ function makeTasks(){
   }));
 }
 
+function confirmLargeRun(tasks){
+  const total=tasks.reduce((sum,task)=>sum+task.count,0);
+  if(tasks.length<=20&&total<=40)return true;
+  return confirm(`这次会排队 ${tasks.length} 个 prompt、预计生成 ${total} 张图片。确认继续吗？`);
+}
+
 function buildImageRequest(task){
   if(task.refFile){
     const formData=new FormData();
@@ -426,8 +456,16 @@ function buildImageRequest(task){
 function setBusy(busy){
   generating=busy;
   $('generateBtn').disabled=busy;
+  $('stopBtn').style.display=busy?'inline-flex':'none';
   $('spinner').style.display=busy?'block':'none';
   $('btnText').textContent=busy?'生成中...':'生成图片';
+}
+
+function stopGeneration(){
+  if(!generating)return;
+  stopRequested=true;
+  if(activeController)activeController.abort();
+  showStatus('正在停止当前队列，已发出的请求会尽快中止','warn');
 }
 
 async function generate(){
@@ -435,9 +473,11 @@ async function generate(){
   const tasks=makeTasks();
   if(!tasks.length){showStatus('请输入 Prompt','danger');return}
   if(tasks.some(t=>t.hasRef)&&!editsSupported){showStatus('当前模式暂不支持参考图，请移除参考图后再生成','danger');return}
+  if(!confirmLargeRun(tasks))return;
 
   currentResults=[];
   failedTasks=[];
+  stopRequested=false;
   lastRunConfig={
     prompts:tasks.map(t=>t.prompt),
     promptMode:$('promptMode').value,
@@ -456,14 +496,21 @@ async function runTasks(tasks,{append=false}={}){
   const expected=tasks.reduce((sum,t)=>sum+t.count,0);
   const baseDone=currentResults.length;
   let completed=0;
+  let stopped=false;
   renderRunMeta(tasks,expected);
   updateOutputActions();
   try{
     for(const task of tasks){
+      if(stopRequested){
+        stopped=true;
+        break;
+      }
       $('outputTitle').textContent=`正在生成 ${completed+1}/${tasks.length} 个任务`;
       showStatus(`正在生成任务 ${completed+1}/${tasks.length}，预计 ${task.count} 张`);
       try{
         const {url,options}=buildImageRequest(task);
+        activeController=new AbortController();
+        options.signal=activeController.signal;
         const res=await authedFetch(url,options);
         const data=await res.json().catch(()=>null);
         if(res.status===401){clearToken();location.reload();return}
@@ -481,23 +528,33 @@ async function runTasks(tasks,{append=false}={}){
           throw new Error('未返回图片数据');
         }
         if(extracted.images.length<task.count){
-          addErrorCard(`任务 ${task.promptIndex+1}: 上游仅返回 ${extracted.images.length}/${task.count} 张`,null);
+          const missing=task.count-extracted.images.length;
+          const retryTask={...task,id:newTaskId(task.promptIndex),count:missing};
+          failedTasks.push(retryTask);
+          addErrorCard(`任务 ${task.promptIndex+1}: 上游仅返回 ${extracted.images.length}/${task.count} 张，可重试缺失的 ${missing} 张`,retryTask);
         }
       }catch(e){
+        if(e.name==='AbortError'){
+          stopped=true;
+          break;
+        }
         failedTasks.push(task);
         addErrorCard(`任务 ${task.promptIndex+1} 失败: ${e.message}`,task);
       }finally{
+        activeController=null;
         completed++;
         updateOutputActions();
       }
     }
     const added=currentResults.length-baseDone;
     const failed=failedTasks.length;
-    $('outputTitle').textContent=`生成完成 (${currentResults.length}/${baseDone+expected})`;
+    $('outputTitle').textContent=stopped?`已停止 (${currentResults.length}/${baseDone+expected})`:`生成完成 (${currentResults.length}/${baseDone+expected})`;
     if(added>0&&lastRunConfig){
       saveHistory({...lastRunConfig,success:added,failed,totalExpected:expected});
     }
-    if(failed===0&&added>=expected){
+    if(stopped){
+      showStatus(`已停止队列，本次新增 ${added} 张，失败任务 ${failed} 个`,'warn');
+    }else if(failed===0&&added>=expected){
       showStatus(`生成完成，共新增 ${added} 张图片`,'success');
     }else if(added>0){
       showStatus(`生成完成，新增 ${added} 张，失败任务 ${failed} 个`,failed?'warn':'info');
@@ -506,9 +563,14 @@ async function runTasks(tasks,{append=false}={}){
     }
   }finally{
     setBusy(false);
+    stopRequested=false;
     updateOutputActions();
     renderRunMeta(tasks,expected);
   }
+}
+
+function newTaskId(index){
+  return `task-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`;
 }
 
 function renderRunMeta(tasks,expected){
@@ -536,6 +598,10 @@ function extractImages(data,task){
   const images=[];
   const itemErrors=[];
   items.forEach((item,index)=>{
+    if(item?.error){
+      itemErrors.push(typeof item.error==='string'?item.error:JSON.stringify(item.error));
+      return;
+    }
     const b64=item?.b64_json;
     const url=item?.url;
     let src='';
@@ -552,8 +618,6 @@ function extractImages(data,task){
         imageIndex:index,
         revisedPrompt:item?.revised_prompt||''
       });
-    }else if(item?.error){
-      itemErrors.push(item.error);
     }
   });
   return {images,itemErrors};
@@ -645,12 +709,157 @@ function downloadImage(src,name){
   a.remove();
 }
 
-function downloadAllImages(){
-  currentResults.forEach((item,index)=>{
-    setTimeout(()=>downloadImage(item.src,filenameFor(item,index)),index*160);
-  });
-  showStatus(`开始下载 ${currentResults.length} 张图片`,'success');
+async function downloadAllImages(){
+  if(!currentResults.length)return;
+  $('downloadAllBtn').disabled=true;
+  showStatus(`正在打包 ${currentResults.length} 张图片...`);
+  try{
+    const files=[];
+    const failures=[];
+    for(let i=0;i<currentResults.length;i++){
+      const item=currentResults[i];
+      try{
+        const bytes=await bytesFromImageSrc(item.src);
+        files.push({
+          name:filenameFor(item,i),
+          bytes
+        });
+      }catch(e){
+        failures.push(`${filenameFor(item,i)}\t${item.src}\t${e.message}`);
+      }
+    }
+    const manifest=[
+      `Image Gen Demo export`,
+      `Created: ${new Date().toISOString()}`,
+      `Images: ${files.length}`,
+      `Failed URLs: ${failures.length}`,
+      '',
+      ...currentResults.map((item,i)=>`${i+1}. ${filenameFor(item,i)} | prompt #${item.promptIndex+1} | ${item.prompt}`)
+    ].join('\n');
+    files.push({name:'manifest.txt',bytes:utf8Bytes(manifest)});
+    if(failures.length){
+      files.push({name:'failed-urls.txt',bytes:utf8Bytes(failures.join('\n'))});
+    }
+    const blob=createZip(files);
+    downloadBlob(blob,`image-gen-${new Date().toISOString().replace(/[-:T]/g,'').slice(0,14)}.zip`);
+    showStatus(`已打包 ${files.length-1-(failures.length?1:0)} 张图片${failures.length?`，${failures.length} 个远程图片未能抓取，已写入清单`:''}`,'success');
+  }catch(e){
+    showStatus(`打包失败: ${e.message}`,'danger');
+  }finally{
+    $('downloadAllBtn').disabled=false;
+  }
 }
+
+async function bytesFromImageSrc(src){
+  if(src.startsWith('data:')){
+    const comma=src.indexOf(',');
+    if(comma<0)throw new Error('invalid data url');
+    const header=src.slice(0,comma);
+    const body=src.slice(comma+1);
+    if(header.includes(';base64')){
+      const raw=atob(body);
+      const bytes=new Uint8Array(raw.length);
+      for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+      return bytes;
+    }
+    return utf8Bytes(decodeURIComponent(body));
+  }
+  const res=await fetch(src,{mode:'cors'});
+  if(!res.ok)throw new Error(`HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+function downloadBlob(blob,name){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
+
+function utf8Bytes(value){
+  return new TextEncoder().encode(value);
+}
+
+function createZip(files){
+  const localParts=[];
+  const centralParts=[];
+  let offset=0;
+  for(const file of files){
+    const nameBytes=utf8Bytes(file.name.replace(/^\/+/,''));
+    const data=file.bytes instanceof Uint8Array?file.bytes:new Uint8Array(file.bytes);
+    const crc=crc32(data);
+    const local=zipLocalHeader(nameBytes,data.length,crc);
+    localParts.push(local,nameBytes,data);
+    centralParts.push(zipCentralHeader(nameBytes,data.length,crc,offset),nameBytes);
+    offset+=local.length+nameBytes.length+data.length;
+  }
+  const centralSize=centralParts.reduce((sum,part)=>sum+part.length,0);
+  const end=zipEndRecord(files.length,centralSize,offset);
+  return new Blob([...localParts,...centralParts,end],{type:'application/zip'});
+}
+
+function zipLocalHeader(nameBytes,size,crc){
+  const b=new Uint8Array(30);
+  const v=new DataView(b.buffer);
+  v.setUint32(0,0x04034b50,true);
+  v.setUint16(4,20,true);
+  v.setUint16(6,0x0800,true);
+  v.setUint16(8,0,true);
+  v.setUint32(14,crc,true);
+  v.setUint32(18,size,true);
+  v.setUint32(22,size,true);
+  v.setUint16(26,nameBytes.length,true);
+  return b;
+}
+
+function zipCentralHeader(nameBytes,size,crc,offset){
+  const b=new Uint8Array(46);
+  const v=new DataView(b.buffer);
+  v.setUint32(0,0x02014b50,true);
+  v.setUint16(4,20,true);
+  v.setUint16(6,20,true);
+  v.setUint16(8,0x0800,true);
+  v.setUint16(10,0,true);
+  v.setUint32(16,crc,true);
+  v.setUint32(20,size,true);
+  v.setUint32(24,size,true);
+  v.setUint16(28,nameBytes.length,true);
+  v.setUint32(42,offset,true);
+  return b;
+}
+
+function zipEndRecord(fileCount,centralSize,centralOffset){
+  const b=new Uint8Array(22);
+  const v=new DataView(b.buffer);
+  v.setUint32(0,0x06054b50,true);
+  v.setUint16(8,fileCount,true);
+  v.setUint16(10,fileCount,true);
+  v.setUint32(12,centralSize,true);
+  v.setUint32(16,centralOffset,true);
+  return b;
+}
+
+function crc32(bytes){
+  let crc=0xffffffff;
+  for(const byte of bytes){
+    crc=(crc>>>8)^CRC_TABLE[(crc^byte)&0xff];
+  }
+  return (crc^0xffffffff)>>>0;
+}
+
+const CRC_TABLE=(()=>{
+  const table=new Uint32Array(256);
+  for(let i=0;i<256;i++){
+    let c=i;
+    for(let k=0;k<8;k++)c=(c&1)?(0xedb88320^(c>>>1)):(c>>>1);
+    table[i]=c>>>0;
+  }
+  return table;
+})();
 
 function filenameFor(item,index){
   const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
@@ -723,8 +932,10 @@ function saveHistory(entry){
 }
 
 function safeHistory(){
-  try{return JSON.parse(localStorage.getItem('imgGenHistory')||'[]')}
-  catch(e){return []}
+  try{
+    const parsed=JSON.parse(localStorage.getItem('imgGenHistory')||'[]');
+    return Array.isArray(parsed)?parsed:[];
+  }catch(e){return []}
 }
 
 function renderHistory(){

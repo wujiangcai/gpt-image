@@ -19,7 +19,7 @@ services:
     depends_on:
       - chatgpt2api
     ports:
-      - "8080:8000"
+      - "127.0.0.1:8080:8000"
     volumes:
       - ./_auth.json:/app/_auth.json
     environment:

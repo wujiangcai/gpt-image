@@ -1,13 +1,18 @@
 import base64
+import asyncio
+import errno
+import ipaddress
 import json
 import math
 import os
 import re
 import secrets
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, Optional
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -22,7 +27,15 @@ MODE = os.getenv("MODE", "relay").lower()
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "180"))
 MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
 MAX_EDIT_IMAGE_BYTES = int(os.getenv("MAX_EDIT_IMAGE_BYTES", str(10 * 1024 * 1024)))
+MAX_CHAT_IMAGE_BYTES = int(os.getenv("MAX_CHAT_IMAGE_BYTES", str(20 * 1024 * 1024)))
+MAX_CONCURRENT_IMAGE_REQUESTS = int(os.getenv("MAX_CONCURRENT_IMAGE_REQUESTS", "3"))
+USER_RATE_LIMIT_PER_MINUTE = int(os.getenv("USER_RATE_LIMIT_PER_MINUTE", "30"))
 EDIT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
+CHAT_IMAGE_HOST_ALLOWLIST = {
+    host.strip().lower()
+    for host in os.getenv("CHAT_IMAGE_HOST_ALLOWLIST", "").split(",")
+    if host.strip()
+}
 
 # Relay mode (existing): forward OpenAI Images API to a real OpenAI-compatible endpoint
 RELAY_BASE = os.getenv("IMAGE_API_BASE", "https://api.openai.com/v1/images").rstrip("/")
@@ -39,7 +52,7 @@ C2A_KEY = os.getenv("C2A_KEY", "")
 
 # ---------- auth (admin token + user keys) ----------
 
-_AUTH_FILE = Path(__file__).parent / "_auth.json"
+_AUTH_FILE = Path(os.getenv("AUTH_FILE", str(Path(__file__).parent / "_auth.json")))
 
 
 def _gen_key(prefix: str) -> str:
@@ -55,8 +68,35 @@ def _load_auth() -> dict:
     return {"admin_token": "", "users": []}
 
 
+def _replace_auth_file(tmp: Path) -> None:
+    tmp.replace(_AUTH_FILE)
+
+
 def _save_auth(data: dict) -> None:
-    _AUTH_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    _AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing_mode = _AUTH_FILE.stat().st_mode & 0o777
+    except OSError:
+        existing_mode = None
+    tmp = _AUTH_FILE.with_name(f"{_AUTH_FILE.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        tmp.write_text(content, "utf-8")
+        if existing_mode is not None:
+            os.chmod(tmp, existing_mode)
+        _replace_auth_file(tmp)
+    except OSError as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if e.errno not in {errno.EBUSY, errno.EXDEV}:
+            raise
+        # Docker single-file bind mounts cannot always be replaced atomically.
+        # Fall back to writing through the existing mount target.
+        _AUTH_FILE.write_text(content, "utf-8")
+        if existing_mode is not None:
+            os.chmod(_AUTH_FILE, existing_mode)
 
 
 def _bootstrap_auth() -> dict:
@@ -73,7 +113,9 @@ def _bootstrap_auth() -> dict:
 
 
 _auth_state = _bootstrap_auth()
-print(f"[auth] admin token = {_auth_state['admin_token']}  (在 .env 设 ADMIN_TOKEN 可固定)")
+_admin_token = _auth_state.get("admin_token", "")
+_admin_token_display = f"{_admin_token[:8]}…{_admin_token[-6:]}" if len(_admin_token) > 16 else "***"
+print(f"[auth] admin token loaded = {_admin_token_display}  (完整值见 AUTH_FILE 或 .env)")
 print(f"[auth] {len(_auth_state.get('users', []))} user key(s) loaded from {_AUTH_FILE.name}")
 
 
@@ -113,6 +155,22 @@ def require_admin(authorization: str | None = Header(default=None)):
         raise HTTPException(403, "admin only")
     return ident
 
+
+def _enforce_user_rate_limit(ident: dict, units: int = 1) -> None:
+    if USER_RATE_LIMIT_PER_MINUTE <= 0:
+        return
+    now = time.time()
+    key = str(ident.get("id") or ident.get("name") or "unknown")
+    recent = [t for t in _recent_usage.get(key, []) if now - t < 60]
+    if len(recent) + units > USER_RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(
+            status_code=429,
+            detail=f"rate limit exceeded: max {USER_RATE_LIMIT_PER_MINUTE} image unit(s) per minute",
+            headers={"Retry-After": "60"},
+        )
+    recent.extend([now] * max(units, 1))
+    _recent_usage[key] = recent
+
 print(f"[ok] MODE={MODE}  MODEL={MODEL}")
 if MODE == "chat2api":
     print(f"     chat completions endpoint = {CHAT_BASE}/chat/completions")
@@ -123,6 +181,9 @@ else:
 app = FastAPI(title="Image Gen Adapter")
 
 _IMG_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)")
+_image_semaphore = asyncio.Semaphore(max(MAX_CONCURRENT_IMAGE_REQUESTS, 1))
+_recent_usage: dict[str, list[float]] = {}
+_account_token_refs: dict[str, str] = {}
 
 
 class GenerateRequest(BaseModel):
@@ -248,6 +309,81 @@ def extract_image_urls(markdown: str) -> list:
     return _IMG_RE.findall(markdown or "")
 
 
+def _host_matches_allowlist(host: str) -> bool:
+    if not CHAT_IMAGE_HOST_ALLOWLIST:
+        return True
+    host = host.lower().rstrip(".")
+    return any(host == allowed or host.endswith(f".{allowed}") for allowed in CHAT_IMAGE_HOST_ALLOWLIST)
+
+
+def _address_is_blocked(value: str) -> bool:
+    ip = ipaddress.ip_address(value)
+    return any(
+        (
+            ip.is_private,
+            ip.is_loopback,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        )
+    )
+
+
+def _validate_image_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("image URL must be http(s)")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise ValueError("image URL host is required")
+    if not _host_matches_allowlist(host):
+        raise ValueError("image URL host is not allowed")
+    try:
+        if _address_is_blocked(host):
+            raise ValueError("image URL resolves to a blocked address")
+    except ValueError as e:
+        if "blocked address" in str(e):
+            raise
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"image URL host cannot be resolved: {e}") from e
+    for info in infos:
+        address = info[4][0]
+        if _address_is_blocked(address):
+            raise ValueError("image URL resolves to a blocked address")
+
+
+async def _download_image_url(client: httpx.AsyncClient, url: str) -> dict:
+    try:
+        _validate_image_url(url)
+    except ValueError as e:
+        return {"url": url, "error": str(e)}
+
+    try:
+        async with client.stream("GET", url, follow_redirects=False) as resp:
+            if resp.status_code != 200:
+                return {"url": url, "error": f"download status {resp.status_code}"}
+            content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            if content_type and content_type not in EDIT_IMAGE_TYPES:
+                return {"url": url, "error": f"download content-type {content_type} is not supported"}
+            length = resp.headers.get("content-length")
+            if length and int(length) > MAX_CHAT_IMAGE_BYTES:
+                return {"url": url, "error": f"download exceeds {MAX_CHAT_IMAGE_BYTES} bytes"}
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_CHAT_IMAGE_BYTES:
+                    return {"url": url, "error": f"download exceeds {MAX_CHAT_IMAGE_BYTES} bytes"}
+                chunks.append(chunk)
+            b64 = base64.b64encode(b"".join(chunks)).decode()
+            return {"b64_json": b64}
+    except Exception as e:
+        return {"url": url, "error": f"download exception: {e}"}
+
+
 # ---------- relay mode (legacy, for otokapi / OpenAI official) ----------
 
 def _upstream_error_status(status_code: int) -> int:
@@ -284,46 +420,63 @@ async def generate_via_chat2api(req: GenerateRequest):
     if not CHAT_KEY:
         raise HTTPException(500, "CHAT_API_KEY not configured (.env)")
 
-    # Augment prompt with size hint since chat-driven image gen doesn't take size param directly
-    aug = req.prompt
-    if req.size and req.size != "auto":
-        aug = f"{req.prompt}\n\n(Image size: {req.size})"
-
-    chat_payload = {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": aug}],
-        "stream": False,
-    }
     headers = {"Authorization": f"Bearer {CHAT_KEY}", "Content-Type": "application/json"}
-
+    image_urls: list[str] = []
+    attempts: list[dict] = []
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        try:
-            r = await client.post(f"{CHAT_BASE}/chat/completions", headers=headers, json=chat_payload)
-        except httpx.HTTPError as e:
-            raise HTTPException(502, f"Upstream chat error: {e}")
+        for i in range(req.n):
+            # Chat-driven image gen does not have a native n parameter, so preserve
+            # the /api/generate contract by issuing one chat image request per image.
+            aug = req.prompt
+            if req.size and req.size != "auto":
+                aug = f"{aug}\n\n(Image size: {req.size})"
+            if req.n > 1:
+                aug = f"{aug}\n\n(Batch image {i + 1} of {req.n}; create one image.)"
 
-    if r.status_code >= 400:
-        return JSONResponse(
-            status_code=_upstream_error_status(r.status_code),
-            content={"error": _safe_json(r), "upstream_status": r.status_code, "stage": "chat_completion"},
-        )
+            chat_payload = {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": aug}],
+                "stream": False,
+            }
+            try:
+                r = await client.post(f"{CHAT_BASE}/chat/completions", headers=headers, json=chat_payload)
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"Upstream chat error: {e}")
 
-    chat_resp = r.json()
-    try:
-        content = chat_resp["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError):
-        return JSONResponse(status_code=502, content={"error": "unexpected chat response shape", "raw": chat_resp})
+            if r.status_code >= 400:
+                attempts.append({"status": r.status_code, "error": _safe_json(r), "stage": "chat_completion"})
+                continue
 
-    image_urls = extract_image_urls(content)
+            chat_resp = r.json()
+            try:
+                content = chat_resp["choices"][0]["message"]["content"] or ""
+            except (KeyError, IndexError, TypeError):
+                attempts.append({"error": "unexpected chat response shape", "raw": chat_resp})
+                continue
+
+            urls = extract_image_urls(content)
+            if not urls:
+                attempts.append(
+                    {
+                        "error": "Model returned no image.",
+                        "model_response": content[:800],
+                        "model": chat_resp.get("model"),
+                        "usage": chat_resp.get("usage"),
+                    }
+                )
+                continue
+            image_urls.extend(urls)
+            if len(image_urls) >= req.n:
+                break
+
     if not image_urls:
+        first_status = next((a["status"] for a in attempts if isinstance(a.get("status"), int)), 502)
         return JSONResponse(
-            status_code=502,
+            status_code=_upstream_error_status(first_status) if first_status >= 400 else 502,
             content={
                 "error": {
                     "message": "Model returned no image. Could mean image-gen not triggered, account lacks capability, or rate-limited.",
-                    "model_response": content[:800],
-                    "model": chat_resp.get("model"),
-                    "usage": chat_resp.get("usage"),
+                    "attempts": attempts,
                 }
             },
         )
@@ -334,16 +487,13 @@ async def generate_via_chat2api(req: GenerateRequest):
     if PROXY:
         client_args["proxy"] = PROXY
     async with httpx.AsyncClient(**client_args) as client:
-        for url in image_urls:
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    b64 = base64.b64encode(resp.content).decode()
-                    images.append({"b64_json": b64, "revised_prompt": req.prompt})
-                else:
-                    images.append({"url": url, "error": f"download status {resp.status_code}"})
-            except Exception as e:
-                images.append({"url": url, "error": f"download exception: {e}"})
+        for url in image_urls[: req.n]:
+            item = await _download_image_url(client, url)
+            if "b64_json" in item:
+                item["revised_prompt"] = req.prompt
+            images.append(item)
+    for attempt in attempts:
+        images.append({"error": attempt.get("error") or attempt.get("stage") or "chat attempt failed"})
 
     return {"created": int(time.time()), "data": images, "model": MODEL}
 
@@ -351,10 +501,12 @@ async def generate_via_chat2api(req: GenerateRequest):
 # ---------- routes ----------
 
 @app.post("/api/generate")
-async def generate(req: GenerateRequest, _: dict = Depends(require_user)):
-    if _current_mode() == "chat2api":
-        return await generate_via_chat2api(req)
-    return await generate_via_relay(req)
+async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
+    _enforce_user_rate_limit(ident, req.n)
+    async with _image_semaphore:
+        if _current_mode() == "chat2api":
+            return await generate_via_chat2api(req)
+        return await generate_via_relay(req)
 
 
 async def _read_edit_image(image: UploadFile) -> bytes:
@@ -378,7 +530,7 @@ async def edits(
     size: Annotated[str, Form()] = "1024x1024",
     n: Annotated[int, Form()] = 1,
     quality: Annotated[str | None, Form()] = None,
-    _: dict = Depends(require_user),
+    ident: dict = Depends(require_user),
 ):
     if _current_mode() == "chat2api":
         # chat2api supports multimodal upload via different mechanism — not implemented yet
@@ -387,6 +539,7 @@ async def edits(
     if n < 1 or n > 4:
         raise HTTPException(400, "n must be between 1 and 4")
 
+    _enforce_user_rate_limit(ident, n)
     cfg = _require_relay_config()
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
     content = await _read_edit_image(image)
@@ -394,11 +547,12 @@ async def edits(
     data = {"model": cfg["model"], "prompt": prompt, "size": size, "n": str(n)}
     if quality:
         data["quality"] = quality
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        try:
-            r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)
-        except httpx.HTTPError as e:
-            raise HTTPException(502, f"Upstream connection error: {e}")
+    async with _image_semaphore:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            try:
+                r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"Upstream connection error: {e}")
     if r.status_code >= 400:
         return JSONResponse(
             status_code=_upstream_error_status(r.status_code),
@@ -408,7 +562,7 @@ async def edits(
 
 
 @app.get("/api/health")
-async def health():
+async def health(_: dict = Depends(require_user)):
     relay = _public_relay_config()
     mode = _current_mode()
     return {
@@ -417,11 +571,15 @@ async def health():
         "model": relay["model"] if mode == "relay" else MODEL,
         "relay_base": relay["base_url"] if mode == "relay" else None,
         "chat_base": CHAT_BASE if mode == "chat2api" else None,
-        "proxy": PROXY,
         "key_loaded": relay["key_loaded"] if mode == "relay" else bool(CHAT_KEY),
         "edits_supported": mode == "relay",
         "c2a_admin": bool(C2A_BASE and C2A_KEY),
     }
+
+
+@app.get("/livez")
+async def livez():
+    return {"ok": True}
 
 
 @app.get("/api/settings/relay")
@@ -482,7 +640,8 @@ def _redact_c2a_response(value):
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
-            if key.lower() in {"access_token", "token", "tokens"}:
+            normalized = key.lower().replace("-", "_")
+            if normalized in {"access_token", "accesstoken", "refresh_token", "refreshtoken", "token", "tokens", "api_key", "apikey"}:
                 if isinstance(item, list):
                     redacted[key] = [_mask_token(str(t)) for t in item]
                 elif isinstance(item, str):
@@ -512,7 +671,7 @@ def _delete_failed(status: int, data: dict) -> bool:
     if status in {400, 404, 405, 422}:
         return True
     if status >= 500:
-        return False
+        return True
     if status >= 400:
         return True
     if data.get("ok") is True:
@@ -586,7 +745,16 @@ def _account_summary(item: dict) -> dict:
 
 @app.get("/api/accounts")
 async def list_accounts(_: dict = Depends(require_admin)):
-    return await _c2a_request("GET", "/api/accounts")
+    status, content = await _c2a_raw_request("GET", "/api/accounts")
+    redacted = _redact_c2a_response(content)
+    global _account_token_refs
+    _account_token_refs = {}
+    for item in content.get("items") or []:
+        if isinstance(item, dict):
+            token = str(item.get("access_token") or item.get("accessToken") or item.get("token") or "").strip()
+            if token:
+                _account_token_refs[_mask_token(token)] = token
+    return JSONResponse(status_code=status, content=redacted)
 
 
 @app.post("/api/accounts")
@@ -594,12 +762,13 @@ async def add_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
     tokens = [t.strip() for t in body.tokens if t and t.strip()]
     if not tokens:
         raise HTTPException(400, "tokens is required")
-    return await _c2a_request("POST", "/api/accounts", json_body={"tokens": tokens})
+    status, content = await _c2a_raw_request("POST", "/api/accounts", json_body={"tokens": tokens})
+    return JSONResponse(status_code=status, content=_redact_c2a_response(content))
 
 
 @app.post("/api/accounts/remove")
 async def remove_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
-    tokens = [t.strip() for t in body.tokens if t and t.strip()]
+    tokens = [_account_token_refs.get(t.strip(), t.strip()) for t in body.tokens if t and t.strip()]
     if not tokens:
         raise HTTPException(400, "tokens is required")
     result = await _delete_c2a_accounts(tokens)
@@ -626,8 +795,9 @@ async def cleanup_accounts(body: CleanupAccountsBody, _: dict = Depends(require_
 
 @app.post("/api/accounts/refresh")
 async def refresh_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
-    tokens = [t.strip() for t in body.tokens if t and t.strip()]
-    return await _c2a_request("POST", "/api/accounts/refresh", json_body={"access_tokens": tokens})
+    tokens = [_account_token_refs.get(t.strip(), t.strip()) for t in body.tokens if t and t.strip()]
+    status, content = await _c2a_raw_request("POST", "/api/accounts/refresh", json_body={"access_tokens": tokens})
+    return JSONResponse(status_code=status, content=_redact_c2a_response(content))
 
 
 # ---------- user management (admin-only) ----------

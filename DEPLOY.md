@@ -1,6 +1,6 @@
 # VPS 部署指南（Ubuntu + Docker compose）
 
-目标：把 image-gen-demo + chatgpt2api 部署到旧金山 VPS，**只暴露端口 8080**，HTTP 访问 `http://<VPS_IP>:8080`。
+目标：把 image-gen-demo + chatgpt2api 部署到旧金山 VPS。建议只把服务绑定到本机端口，再通过 Caddy/Nginx/Cloudflare Tunnel 提供 HTTPS；不要长期把 bearer token 暴露在公网 HTTP 上。
 
 ---
 
@@ -60,7 +60,7 @@ cd ~/image-gen-demo
 
 # 先把从本机拷来的本机凭据删掉
 rm -f .env _auth.json
-rm -rf .venv __pycache__
+rm -rf .venv __pycache__ c2a-data .claude
 
 # 生成两段随机字符串
 openssl rand -base64 32 | tr -d /+= | head -c 40 ; echo   # 抄下来当 ADMIN_TOKEN
@@ -75,6 +75,7 @@ nano .env
 
 # bind mount 的占位文件必须先存在（否则 Docker 会当目录建出来）
 touch _auth.json
+chmod 600 .env _auth.json c2a-config.json
 ```
 
 `.env` 应该长这样：
@@ -110,29 +111,37 @@ image-gen-demo   Up
 
 ---
 
-## 5. VPS：开防火墙
+## 5. VPS：配置 HTTPS 入口
 
 ```bash
-# Ubuntu 默认有 ufw
-sudo ufw allow 8080/tcp
+# 只开放 HTTPS 入口，不直接开放 image-gen-demo 的 8080 端口
+sudo ufw allow 443/tcp
+sudo ufw allow 80/tcp
 sudo ufw status
 
 # 如果 VPS 提供商（搬瓦工/Linode/DO/AWS）有控制台防火墙，
-# 也要去那里允许 8080 端口入站
+# 也只放行 80/443，或使用 Cloudflare Tunnel 不开放入站端口。
 ```
+
+用 Caddy/Nginx/Cloudflare Tunnel 把公网 HTTPS 反代到 `127.0.0.1:8080`。`docker-compose.yml` 默认只监听本机地址，避免把 bearer token 暴露在公网 HTTP。
 
 ---
 
 ## 6. 测试访问
 
-本机浏览器开：
+如果还没有 HTTPS 反代，只在 VPS 本机先测：
 ```
-http://<VPS_IP>:8080
+curl http://localhost:8080/livez
+```
+
+配置好 HTTPS 入口后，本机浏览器开：
+```
+https://<你的域名>
 ```
 
 应该看到登录框 → 粘贴你刚才生成的 `ADMIN_TOKEN` → 登录成功 → 进画图主页。
 
-去 `http://<VPS_IP>:8080/admin`：
+去 `https://<你的域名>/admin`：
 1. 在「生图来源」选择 `中转站 Relay` 或 `账号池 ChatGPT`，保存后无需重启。
 2. 在「中转站生图设置」里填写中转站图片 API 路径（例如 `https://your-relay.com/v1/images`）、模型（例如 `gpt-image-2`）和 API Key。
 3. 如使用内置 chatgpt2api 号池，继续添加 ChatGPT access_token → 看到额度。
@@ -168,8 +177,8 @@ docker compose up -d --build image-gen-demo
 
 ## 8. 安全建议
 
-1. **HTTP 没有 HTTPS**：你和同事的 token 在公网明文传。短期内 2 人内部用 OK，但**不要把 admin token 在咖啡店 WiFi 下登**。
-2. **80/443 已被占**：未来想上 HTTPS，几条路：
+1. **不要公网 HTTP**：管理员 token、用户密钥和账号池 token 都是 bearer 凭据，必须走 HTTPS 或可信隧道。
+2. **80/443 已被占**：可以选这些路：
    - 在原网站的 nginx/caddy 上加一个 `location /image/` 反代到 `127.0.0.1:8080`
    - 用 [Cloudflare Tunnel](https://www.cloudflare.com/products/tunnel/) 免费给一个 *.trycloudflare.com 域名 + 自动 HTTPS
    - 弄个域名，跑 Caddy 在另一个端口（比如 8443）
@@ -180,11 +189,11 @@ docker compose up -d --build image-gen-demo
 
 ## 9. 常见问题
 
-**Q：浏览器打不开 8080**
+**Q：浏览器打不开**
 - 防火墙 `sudo ufw status`
-- VPS 提供商控制台防火墙
+- VPS 提供商控制台防火墙或 Tunnel 状态
 - `docker compose ps` 看容器在不在
-- `curl http://localhost:8080/api/health` VPS 自己能不能通
+- `curl http://localhost:8080/livez` VPS 自己能不能通
 
 **Q：admin 登录后画图 502 / 出错**
 - 先检查 `/admin` →「生图来源」当前选的是 `中转站 Relay` 还是 `账号池 ChatGPT`
@@ -200,7 +209,7 @@ docker compose up -d --build image-gen-demo
 - 如果不通，往 `c2a-config.json` 的 `"proxy"` 字段填代理地址
 
 **Q：怎么把同事接进来**
-1. 你用 ADMIN_TOKEN 登 `http://<VPS_IP>:8080/admin`
+1. 你用 ADMIN_TOKEN 登 `https://<你的域名>/admin`
 2. 在「用户密钥管理」填备注名 → 创建
 3. 复制 `sk-app-xxx` 发给同事
-4. 同事浏览器开 `http://<VPS_IP>:8080`，粘贴密钥登录就能画图
+4. 同事浏览器开 `https://<你的域名>`，粘贴密钥登录就能画图

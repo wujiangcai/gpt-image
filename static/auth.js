@@ -41,7 +41,7 @@ function showLoginPanel(opts = {}) {
       <input type="password" id="__loginInput" placeholder="paste your token…" style="width:100%;background:#1e1e2e;border:1px solid #2a2a3e;border-radius:10px;padding:12px 14px;color:#e2e2f0;font-size:.88rem;font-family:'SF Mono',Consolas,monospace;outline:none;margin-bottom:12px;box-sizing:border-box">
       <div id="__loginError" style="font-size:.78rem;color:#f87171;margin-bottom:14px;min-height:16px;text-align:center"></div>
       <button id="__loginBtn" style="width:100%;background:linear-gradient(135deg,#7c5cfc,#6d4de8);color:#fff;border:none;border-radius:10px;padding:11px;font-size:.92rem;font-weight:600;cursor:pointer;transition:transform .15s">登录</button>
-      <p style="font-size:.7rem;color:#8888a0;margin-top:14px;text-align:center;line-height:1.5">第一次使用？admin token 在服务启动日志里（<code style="background:#1e1e2e;padding:1px 5px;border-radius:3px;color:#a78bfa">[auth] admin token = ...</code>）</p>
+      <p style="font-size:.7rem;color:#8888a0;margin-top:14px;text-align:center;line-height:1.5">第一次使用？admin token 来自 <code style="background:#1e1e2e;padding:1px 5px;border-radius:3px;color:#a78bfa">ADMIN_TOKEN</code>，未配置时会生成并保存到 <code style="background:#1e1e2e;padding:1px 5px;border-radius:3px;color:#a78bfa">_auth.json</code>。</p>
     </div>
   `;
   document.body.appendChild(panel);

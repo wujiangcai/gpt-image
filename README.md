@@ -35,7 +35,7 @@ IMAGE_API_BASE=https://otokapi.com/v1/images   # 改成你中转商的图片 API
 IMAGE_MODEL=gpt-image-2                         # 改成你中转商支持的模型
 ```
 
-如果 `.env` 未设置 `ADMIN_TOKEN`，服务首次启动会在日志里生成一个管理员 token，并保存到 `_auth.json`。
+如果 `.env` 未设置 `ADMIN_TOKEN`，服务首次启动会生成一个管理员 token，并保存到 `_auth.json`；日志只会脱敏显示，完整值请从 `_auth.json` 查看。
 
 启动：
 
@@ -64,7 +64,7 @@ python main.py
 - `模型`：例如 `gpt-image-2`
 - `API Key`：中转站提供的 key
 
-保存后立即生效，不需要重启服务。`API Key` 不会回显给前端，普通用户只能通过 `/api/health` 看到是否已配置。管理员配置会保存到 `_auth.json` 的 `relay` 字段；如果未保存管理员配置，则回退使用 `.env` 里的 `IMAGE_API_BASE`、`IMAGE_API_KEY`、`IMAGE_MODEL`。
+保存后立即生效，不需要重启服务。`API Key` 不会回显给前端，普通用户登录后只能通过 `/api/health` 看到是否已配置。管理员配置会保存到 `_auth.json` 的 `relay` 字段；如果未保存管理员配置，则回退使用 `.env` 里的 `IMAGE_API_BASE`、`IMAGE_API_KEY`、`IMAGE_MODEL`。
 
 ## 账号池管理
 
@@ -88,7 +88,8 @@ python main.py
 |------|------|------|
 | `POST /api/generate` | JSON 请求，纯文本 prompt 生图 | `{API_BASE}/generations` |
 | `POST /api/edits` | multipart 请求，带参考图 | `{API_BASE}/edits` |
-| `GET /api/health` | 健康检查 + 当前公开配置 | 本地 |
+| `GET /api/health` | 登录后健康检查 + 当前公开配置 | 本地 |
+| `GET /livez` | 无鉴权存活检查，只返回 `{ok:true}` | 本地 |
 | `GET /api/settings/relay` | 管理员查看中转站配置状态 | 本地 |
 | `PUT /api/settings/relay` | 管理员保存中转站 API 路径 / 模型 / key | 本地 |
 | `GET /api/settings/mode` | 管理员查看当前生图来源 | 本地 |
@@ -120,12 +121,16 @@ API Key: 中转商给的 key
 - 管理员 token 和 `sk-app-*` 用户密钥都可以登录首页生图；只有管理员 token 能访问 `/admin`。
 - 首页支持两种任务模式：`单条` 适合反复打磨一个 prompt，`多行批量` 会把文本框里的每一行当作一个独立 prompt 排队生成。
 - `每个 prompt 出图` 会直接传给上游的 `n` 参数，一次请求最多 4 张；多行批量时总出图数 = prompt 行数 × 每行数量，失败任务会保留在页面上并支持单独或批量重试。
+- 批量队列开始前会对很大的任务量二次确认；运行中可点 `停止` 中止后续队列，已生成结果会保留。上游只返回部分图片时，页面会把缺失张数作为可重试任务，避免整条 prompt 重新消耗额度。
 - `质量` 会透传为上游图片接口的 `quality` 参数；不确定中转商是否支持时选 `默认`，避免额外参数导致 400。
-- 结果区支持单图下载、复用该图 prompt、复制图片地址/base64，以及 `下载全部`。批量下载使用浏览器下载能力，浏览器可能会询问是否允许多个文件下载。
+- 结果区支持单图下载、复用该图 prompt、复制图片地址/base64，以及 `下载全部`。`下载全部` 会在浏览器里打包成一个 ZIP，包含图片和 `manifest.txt`；如果远程图片因 CORS 无法抓取，会把失败 URL 写入 `failed-urls.txt`。
 - 历史记录保存 prompt 列表、尺寸、数量、质量、风格、成功/失败数量和是否含参考图，不保存完整图片数据，避免高频生图时撑爆浏览器 `localStorage`。
 - 如果上游中转站 API key 失效或被拒绝，前端不会再把当前登录密钥误判为失效。页面会显示生成失败，上游状态保存在响应里的 `upstream_status` 字段中。
 - 参考图只在 `relay` 模式可用。`chat2api` 模式下首页会提示当前模式暂不支持参考图，并阻止带参考图请求。
 - 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。参考图模式同样支持 `n` 和 `quality` 透传。
+- `chat2api` 模式没有原生 `n` 参数，后端会为 `n>1` 顺序发起多次 chat image 请求，尽量保持 `/api/generate` 行为一致；部分失败会作为结果里的错误项返回，前端可对缺失图片重试。后端下载模型返回图片时会拦截私网/localhost 地址，并可用 `CHAT_IMAGE_HOST_ALLOWLIST` 限定可信 CDN 域名。
+- 后端默认开启基础保护：`USER_RATE_LIMIT_PER_MINUTE=30` 按用户限制每分钟图片单位，`MAX_CONCURRENT_IMAGE_REQUESTS=3` 控制全局同时生图请求数。团队共享或公网部署时建议按额度调小。
+- 管理员 token 日志只脱敏显示；`/api/accounts`、添加/刷新/删除账号相关响应会对 token 字段脱敏。账号列表里的删除操作使用服务端临时映射，避免完整 ChatGPT access_token 进入页面 DOM。
 
 ## 本地验证
 
