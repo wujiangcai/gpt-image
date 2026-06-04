@@ -76,7 +76,7 @@ python main.py
 - `清理异常账号`：删除状态不是 `normal`/`正常` 的账号。
 - `包含零额度`：勾选后也会清理图片剩余额度为 0 的账号。
 
-预览和清理结果只显示脱敏 token，不会把完整 `access_token` 回显到页面。
+预览和清理结果只显示脱敏 token，不会把完整 `access_token` 回显到页面。账号列表也只返回脱敏 token 和服务端生成的 `token_id`；删除/同步额度时浏览器提交 `token_id`，后端再临时向账号池查询并映射到完整 token，避免完整 ChatGPT access_token 进入页面 DOM 或日志。
 
 ## 用户密钥
 
@@ -97,6 +97,7 @@ python main.py
 | `GET /api/accounts` | 管理员查看账号池 | chatgpt2api |
 | `POST /api/accounts/remove` | 管理员删除账号，带兼容 fallback | chatgpt2api |
 | `POST /api/accounts/cleanup` | 管理员预览或批量清理异常账号 | chatgpt2api |
+| `GET /api/usage` | 管理员查看本进程内请求/图片/失败统计 | 本地 |
 
 后端只做**转发**，不改请求体（除了把 model 字段从管理员配置或 `.env` 注入），上游返回什么就返回什么。
 
@@ -130,7 +131,8 @@ API Key: 中转商给的 key
 - 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。参考图模式同样支持 `n` 和 `quality` 透传。
 - `chat2api` 模式没有原生 `n` 参数，后端会为 `n>1` 顺序发起多次 chat image 请求，尽量保持 `/api/generate` 行为一致；部分失败会作为结果里的错误项返回，前端可对缺失图片重试。后端下载模型返回图片时会拦截私网/localhost 地址，并可用 `CHAT_IMAGE_HOST_ALLOWLIST` 限定可信 CDN 域名。
 - 后端默认开启基础保护：`USER_RATE_LIMIT_PER_MINUTE=30` 按用户限制每分钟图片单位，`MAX_CONCURRENT_IMAGE_REQUESTS=3` 控制全局同时生图请求数。团队共享或公网部署时建议按额度调小。
-- 管理员 token 日志只脱敏显示；`/api/accounts`、添加/刷新/删除账号相关响应会对 token 字段脱敏。账号列表里的删除操作使用服务端临时映射，避免完整 ChatGPT access_token 进入页面 DOM。
+- 管理员 token 日志只脱敏显示；`/api/accounts`、添加/刷新/删除账号相关响应会对 token 字段脱敏。账号列表里的删除操作使用服务端 `token_id` 临时映射，避免完整 ChatGPT access_token 进入页面 DOM。
+- `/admin` 的「运行概览」会展示当前进程内的请求数、请求图片数、成功/失败图片数、Top 用户和最近请求。该统计只保存在内存里，服务重启会清零；它用于轻量运维观察，不替代持久审计日志。
 
 ## 本地验证
 
@@ -141,7 +143,7 @@ node --check static/auth.js
 node -e "const fs=require('fs'); const html=fs.readFileSync('static/index.html','utf8'); const scripts=[]; let rest=html; while(true){ const a=rest.indexOf('<script>'); if(a<0) break; const b=rest.indexOf('</script>', a); scripts.push(rest.slice(a+8,b)); rest=rest.slice(b+9); } for (const s of scripts) new Function(s); console.log('inline scripts ok:', scripts.length);"
 ```
 
-`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、异常账号预览/清理与 token 脱敏、上游认证失败状态映射、纯文本生成的 `n`/`quality` 转发、参考图上传字段和后端校验。
+`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、账号 `token_id` 删除/同步与 token 脱敏、异常账号预览/清理、管理员使用统计、上游认证失败状态映射、纯文本生成的 `n`/`quality` 转发、参考图上传字段和后端校验。
 
 ## 常见错误排查
 

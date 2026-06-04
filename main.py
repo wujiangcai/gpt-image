@@ -1,6 +1,7 @@
 import base64
 import asyncio
 import errno
+import hashlib
 import ipaddress
 import json
 import math
@@ -171,6 +172,87 @@ def _enforce_user_rate_limit(ident: dict, units: int = 1) -> None:
     recent.extend([now] * max(units, 1))
     _recent_usage[key] = recent
 
+
+def _image_result_counts(value) -> tuple[int, int]:
+    content = value.body if isinstance(value, JSONResponse) else value
+    if isinstance(content, (bytes, bytearray)):
+        try:
+            content = json.loads(content.decode("utf-8"))
+        except Exception:
+            content = None
+    if not isinstance(content, dict):
+        return 0, 1
+    items = content.get("data")
+    if not isinstance(items, list):
+        return 0, 1 if content.get("error") else 0
+    success = sum(1 for item in items if isinstance(item, dict) and (item.get("b64_json") or item.get("url")) and not item.get("error"))
+    failed = sum(1 for item in items if isinstance(item, dict) and item.get("error"))
+    return success, failed
+
+
+def _short_error(value) -> str:
+    content = value.body if isinstance(value, JSONResponse) else value
+    if isinstance(content, (bytes, bytearray)):
+        try:
+            content = json.loads(content.decode("utf-8"))
+        except Exception:
+            return ""
+    if not isinstance(content, dict):
+        return ""
+    err = content.get("error") or content.get("detail")
+    if isinstance(err, dict):
+        err = err.get("message") or err.get("error") or err
+    text = err if isinstance(err, str) else json.dumps(err, ensure_ascii=False) if err else ""
+    return text[:240]
+
+
+def _record_usage(ident: dict, endpoint: str, mode: str, requested: int, result, status_code: int, elapsed_ms: int) -> None:
+    success, item_errors = _image_result_counts(result)
+    failed = max(requested - success, item_errors, 0) if status_code < 400 else requested
+    user_id = str(ident.get("id") or ident.get("name") or "unknown")
+    user = _usage_stats["users"].setdefault(
+        user_id,
+        {"name": ident.get("name") or user_id, "role": ident.get("role", "user"), "requests": 0, "requested_images": 0, "successful_images": 0, "failed_images": 0},
+    )
+    _usage_stats["requests"] += 1
+    _usage_stats["requested_images"] += requested
+    _usage_stats["successful_images"] += success
+    _usage_stats["failed_images"] += failed
+    user["requests"] += 1
+    user["requested_images"] += requested
+    user["successful_images"] += success
+    user["failed_images"] += failed
+    event = {
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "user_id": user_id,
+        "user_name": user["name"],
+        "endpoint": endpoint,
+        "mode": mode,
+        "requested_images": requested,
+        "successful_images": success,
+        "failed_images": failed,
+        "status_code": status_code,
+        "elapsed_ms": elapsed_ms,
+    }
+    error = _short_error(result)
+    if error:
+        event["error"] = error
+    _usage_stats["recent"].insert(0, event)
+    del _usage_stats["recent"][50:]
+
+
+def _usage_snapshot() -> dict:
+    users = sorted(_usage_stats["users"].items(), key=lambda kv: kv[1].get("requested_images", 0), reverse=True)
+    return {
+        "started_at": _usage_stats["started_at"],
+        "requests": _usage_stats["requests"],
+        "requested_images": _usage_stats["requested_images"],
+        "successful_images": _usage_stats["successful_images"],
+        "failed_images": _usage_stats["failed_images"],
+        "users": [{"id": uid, **stats} for uid, stats in users],
+        "recent": list(_usage_stats["recent"]),
+    }
+
 print(f"[ok] MODE={MODE}  MODEL={MODEL}")
 if MODE == "chat2api":
     print(f"     chat completions endpoint = {CHAT_BASE}/chat/completions")
@@ -183,7 +265,15 @@ app = FastAPI(title="Image Gen Adapter")
 _IMG_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)")
 _image_semaphore = asyncio.Semaphore(max(MAX_CONCURRENT_IMAGE_REQUESTS, 1))
 _recent_usage: dict[str, list[float]] = {}
-_account_token_refs: dict[str, str] = {}
+_usage_stats: dict = {
+    "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "requests": 0,
+    "requested_images": 0,
+    "successful_images": 0,
+    "failed_images": 0,
+    "users": {},
+    "recent": [],
+}
 
 
 class GenerateRequest(BaseModel):
@@ -503,10 +593,25 @@ async def generate_via_chat2api(req: GenerateRequest):
 @app.post("/api/generate")
 async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
     _enforce_user_rate_limit(ident, req.n)
-    async with _image_semaphore:
-        if _current_mode() == "chat2api":
-            return await generate_via_chat2api(req)
-        return await generate_via_relay(req)
+    mode = _current_mode()
+    started = time.perf_counter()
+    status_code = 200
+    result = None
+    try:
+        async with _image_semaphore:
+            if mode == "chat2api":
+                result = await generate_via_chat2api(req)
+            else:
+                result = await generate_via_relay(req)
+        status_code = result.status_code if isinstance(result, JSONResponse) else 200
+        return result
+    except HTTPException as e:
+        status_code = e.status_code
+        result = {"error": e.detail}
+        raise
+    finally:
+        if result is not None:
+            _record_usage(ident, "generate", mode, req.n, result, status_code, int((time.perf_counter() - started) * 1000))
 
 
 async def _read_edit_image(image: UploadFile) -> bytes:
@@ -540,6 +645,10 @@ async def edits(
         raise HTTPException(400, "n must be between 1 and 4")
 
     _enforce_user_rate_limit(ident, n)
+    mode = _current_mode()
+    started = time.perf_counter()
+    status_code = 200
+    result = None
     cfg = _require_relay_config()
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
     content = await _read_edit_image(image)
@@ -547,18 +656,29 @@ async def edits(
     data = {"model": cfg["model"], "prompt": prompt, "size": size, "n": str(n)}
     if quality:
         data["quality"] = quality
-    async with _image_semaphore:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            try:
-                r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)
-            except httpx.HTTPError as e:
-                raise HTTPException(502, f"Upstream connection error: {e}")
-    if r.status_code >= 400:
-        return JSONResponse(
-            status_code=_upstream_error_status(r.status_code),
-            content={"error": _safe_json(r), "upstream_status": r.status_code},
-        )
-    return r.json()
+    try:
+        async with _image_semaphore:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                try:
+                    r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)
+                except httpx.HTTPError as e:
+                    raise HTTPException(502, f"Upstream connection error: {e}")
+        if r.status_code >= 400:
+            result = JSONResponse(
+                status_code=_upstream_error_status(r.status_code),
+                content={"error": _safe_json(r), "upstream_status": r.status_code},
+            )
+            status_code = result.status_code
+            return result
+        result = r.json()
+        return result
+    except HTTPException as e:
+        status_code = e.status_code
+        result = {"error": e.detail}
+        raise
+    finally:
+        if result is not None:
+            _record_usage(ident, "edits", mode, n, result, status_code, int((time.perf_counter() - started) * 1000))
 
 
 @app.get("/api/health")
@@ -597,6 +717,11 @@ async def get_mode_settings(_: dict = Depends(require_admin)):
     return _public_mode_config()
 
 
+@app.get("/api/usage")
+async def get_usage(_: dict = Depends(require_admin)):
+    return _usage_snapshot()
+
+
 @app.put("/api/settings/mode")
 async def update_mode_settings(body: ModeSettingsBody, _: dict = Depends(require_admin)):
     return _save_mode_config(body)
@@ -606,6 +731,7 @@ async def update_mode_settings(body: ModeSettingsBody, _: dict = Depends(require
 
 class TokenListBody(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    token_ids: list[str] = Field(default_factory=list)
 
 
 def _ensure_c2a():
@@ -636,12 +762,53 @@ def _mask_token(token: str) -> str:
     return f"{token[:8]}…{token[-6:]}"
 
 
+def _token_id(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _public_account_item(item: dict) -> dict:
+    public = _redact_c2a_response(item)
+    token = str(item.get("access_token") or item.get("accessToken") or item.get("token") or "").strip()
+    if token:
+        public["token_id"] = _token_id(token)
+        public["token_masked"] = _mask_token(token)
+        public["access_token"] = _mask_token(token)
+    return public
+
+
+async def _resolve_account_tokens(tokens: list[str], token_ids: list[str]) -> list[str]:
+    resolved = [t.strip() for t in tokens if t and t.strip()]
+    wanted = {t.strip() for t in token_ids if t and t.strip()}
+    if wanted:
+        status, content = await _c2a_raw_request("GET", "/api/accounts")
+        if status >= 400:
+            raise HTTPException(status, _redact_c2a_response(content))
+        by_id = {}
+        for item in content.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            token = str(item.get("access_token") or item.get("accessToken") or item.get("token") or "").strip()
+            if token:
+                by_id[_token_id(token)] = token
+        missing = sorted(wanted - set(by_id))
+        if missing:
+            raise HTTPException(404, {"message": "account token id not found", "token_ids": missing})
+        resolved.extend(by_id[token_id] for token_id in sorted(wanted))
+    seen = set()
+    unique = []
+    for token in resolved:
+        if token not in seen:
+            seen.add(token)
+            unique.append(token)
+    return unique
+
+
 def _redact_c2a_response(value):
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
             normalized = key.lower().replace("-", "_")
-            if normalized in {"access_token", "accesstoken", "refresh_token", "refreshtoken", "token", "tokens", "api_key", "apikey"}:
+            if normalized in {"access_token", "accesstoken", "refresh_token", "refreshtoken", "token", "tokens", "access_tokens", "accesstokens", "api_key", "apikey"}:
                 if isinstance(item, list):
                     redacted[key] = [_mask_token(str(t)) for t in item]
                 elif isinstance(item, str):
@@ -746,15 +913,12 @@ def _account_summary(item: dict) -> dict:
 @app.get("/api/accounts")
 async def list_accounts(_: dict = Depends(require_admin)):
     status, content = await _c2a_raw_request("GET", "/api/accounts")
-    redacted = _redact_c2a_response(content)
-    global _account_token_refs
-    _account_token_refs = {}
-    for item in content.get("items") or []:
-        if isinstance(item, dict):
-            token = str(item.get("access_token") or item.get("accessToken") or item.get("token") or "").strip()
-            if token:
-                _account_token_refs[_mask_token(token)] = token
-    return JSONResponse(status_code=status, content=redacted)
+    if isinstance(content, dict) and isinstance(content.get("items"), list):
+        public = {**_redact_c2a_response(content), "items": []}
+        public["items"] = [_public_account_item(item) if isinstance(item, dict) else item for item in content.get("items") or []]
+    else:
+        public = _redact_c2a_response(content)
+    return JSONResponse(status_code=status, content=public)
 
 
 @app.post("/api/accounts")
@@ -768,9 +932,9 @@ async def add_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
 
 @app.post("/api/accounts/remove")
 async def remove_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
-    tokens = [_account_token_refs.get(t.strip(), t.strip()) for t in body.tokens if t and t.strip()]
+    tokens = await _resolve_account_tokens(body.tokens, body.token_ids)
     if not tokens:
-        raise HTTPException(400, "tokens is required")
+        raise HTTPException(400, "tokens or token_ids is required")
     result = await _delete_c2a_accounts(tokens)
     return JSONResponse(status_code=200 if result["ok"] else 502, content=result)
 
@@ -795,7 +959,7 @@ async def cleanup_accounts(body: CleanupAccountsBody, _: dict = Depends(require_
 
 @app.post("/api/accounts/refresh")
 async def refresh_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
-    tokens = [_account_token_refs.get(t.strip(), t.strip()) for t in body.tokens if t and t.strip()]
+    tokens = await _resolve_account_tokens(body.tokens, body.token_ids)
     status, content = await _c2a_raw_request("POST", "/api/accounts/refresh", json_body={"access_tokens": tokens})
     return JSONResponse(status_code=status, content=_redact_c2a_response(content))
 

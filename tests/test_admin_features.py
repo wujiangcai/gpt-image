@@ -39,6 +39,7 @@ class AdminFeatureTests(unittest.TestCase):
         self.main = importlib.reload(main)
         self.main._save_auth({"admin_token": "admin-test-token", "users": []})
         self.main._recent_usage.clear()
+        self.main._usage_stats.update({"requests": 0, "requested_images": 0, "successful_images": 0, "failed_images": 0, "users": {}, "recent": []})
         self.main.CHAT_IMAGE_HOST_ALLOWLIST.clear()
         self.client = TestClient(self.main.app)
         self.headers = {"Authorization": "Bearer admin-test-token"}
@@ -134,30 +135,53 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(data["deleted"], 0)
         self.assertNotIn(token, json.dumps(data, ensure_ascii=False))
 
-    def test_accounts_list_redacts_tokens_and_remove_accepts_mask(self):
+    def test_accounts_list_redacts_tokens_and_remove_accepts_token_id(self):
         token = "eyJhbGciOiJSUzI1NiIs.real-account-token"
+        refresh = "refresh-secret-token"
         calls = []
 
         async def fake_request(method, path, *, json_body=None):
             calls.append((method, path, json_body))
             if method == "GET":
-                return 200, {"items": [{"email": "a@example.com", "access_token": token, "refresh_token": "refresh-secret-token"}]}
+                return 200, {"items": [{"email": "a@example.com", "access_token": token, "refresh_token": refresh}]}
             return 200, {"ok": True, "deleted": len(json_body["tokens"]), "tokens": json_body["tokens"]}
 
         with patch.object(self.main, "_c2a_raw_request", fake_request):
             r = self.client.get("/api/accounts", headers=self.headers)
             self.assertEqual(r.status_code, 200)
             data = r.json()
-            self.assertNotIn(token, json.dumps(data, ensure_ascii=False))
-            masked = data["items"][0]["access_token"]
-            self.assertIn("…", masked)
+            dumped = json.dumps(data, ensure_ascii=False)
+            self.assertNotIn(token, dumped)
+            self.assertNotIn(refresh, dumped)
+            item = data["items"][0]
+            self.assertIn("…", item["access_token"])
+            self.assertIn("…", item["token_masked"])
+            self.assertRegex(item["token_id"], r"^[0-9a-f]{16}$")
 
-            r = self.client.post("/api/accounts/remove", json={"tokens": [masked]}, headers=self.headers)
+            r = self.client.post("/api/accounts/remove", json={"token_ids": [item["token_id"]]}, headers=self.headers)
 
         self.assertEqual(r.status_code, 200)
         self.assertEqual(calls[-1][2]["tokens"], [token])
 
-    def test_cleanup_preview_and_execute_abnormal_accounts(self):
+    def test_accounts_refresh_accepts_token_id_and_redacts_response(self):
+        token = "eyJhbGciOiJSUzI1NiIs.refresh-account-token"
+        calls = []
+
+        async def fake_request(method, path, *, json_body=None):
+            calls.append((method, path, json_body))
+            if method == "GET":
+                return 200, {"items": [{"email": "a@example.com", "access_token": token}]}
+            return 200, {"ok": True, "access_tokens": json_body["access_tokens"], "access_token": token}
+
+        token_id = self.main._token_id(token)
+        with patch.object(self.main, "_c2a_raw_request", fake_request):
+            r = self.client.post("/api/accounts/refresh", json={"token_ids": [token_id]}, headers=self.headers)
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(calls[-1][2]["access_tokens"], [token])
+        self.assertNotIn(token, json.dumps(r.json(), ensure_ascii=False))
+
+
         accounts = {
             "items": [
                 {"email": "ok@example.com", "status": "normal", "quota": 4, "access_token": "normal-token-1234567890"},
@@ -449,7 +473,48 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(r.status_code, 429)
         self.assertEqual(r.headers.get("retry-after"), "60")
 
-    def test_edits_validates_upload_and_sends_single_image_field(self):
+    def test_usage_requires_admin_and_records_generate(self):
+        r = self.client.get("/api/usage")
+        self.assertEqual(r.status_code, 401)
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"abc"},{"error":"upstream partial"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "abc"}, {"error": "upstream partial"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "usage test", "size": "1024x1024", "n": 2},
+                headers=self.headers,
+            )
+        self.assertEqual(r.status_code, 200)
+
+        r = self.client.get("/api/usage", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["requests"], 1)
+        self.assertEqual(data["requested_images"], 2)
+        self.assertEqual(data["successful_images"], 1)
+        self.assertEqual(data["failed_images"], 1)
+        self.assertEqual(data["recent"][0]["endpoint"], "generate")
+
+
         captured = {}
 
         class FakeResponse:
