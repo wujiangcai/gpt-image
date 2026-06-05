@@ -45,6 +45,8 @@ RELAY_KEY = os.getenv("IMAGE_API_KEY", "")
 # chat2api mode: translate /v1/images/generations -> /v1/chat/completions, parse markdown for image URLs
 CHAT_BASE = os.getenv("CHAT_API_BASE", "http://127.0.0.1:3000/v1").rstrip("/")
 CHAT_KEY = os.getenv("CHAT_API_KEY", "")
+RELAY_ONLY_MODELS = {"gpt-image-2"}
+DEFAULT_ACCOUNT_POOL_MODELS = ("gpt-4o-image", "gpt-4o")
 PROXY = os.getenv("HTTP_PROXY") or os.getenv("PROXY") or None
 
 # chatgpt2api account-management proxy (browser hits image-gen-demo, server forwards with hidden key)
@@ -281,6 +283,7 @@ class GenerateRequest(BaseModel):
     size: str = "1024x1024"
     n: int = Field(default=1, ge=1, le=4)
     quality: Optional[str] = None
+    model: Optional[str] = Field(default=None, max_length=120)
 
 
 class RelaySettingsBody(BaseModel):
@@ -307,6 +310,64 @@ def _normalize_mode(value: str) -> str:
 
 def _current_mode() -> str:
     return _normalize_mode((_load_auth().get("settings") or {}).get("mode") or MODE)
+
+
+def _account_pool_models() -> list[str]:
+    configured = [m.strip() for m in os.getenv("ACCOUNT_POOL_MODELS", "").split(",") if m.strip()]
+    models: list[str] = []
+    for model in [*configured, *DEFAULT_ACCOUNT_POOL_MODELS, MODEL]:
+        if model and model not in RELAY_ONLY_MODELS and model not in models:
+            models.append(model)
+    return models
+
+
+def _model_options() -> list[dict]:
+    relay = _public_relay_config()
+    relay_ready = bool(relay["base_url"] and relay["key_loaded"])
+    account_ready = bool(CHAT_KEY)
+    options = [
+        {
+            "id": "gpt-image-2",
+            "label": "GPT Image 2（中转站，支持参考图）",
+            "source": "relay",
+            "ready": relay_ready,
+            "supports_edits": True,
+        }
+    ]
+    for model in _account_pool_models():
+        options.append(
+            {
+                "id": model,
+                "label": f"{model}（账号池）",
+                "source": "chat2api",
+                "ready": account_ready,
+                "supports_edits": False,
+            }
+        )
+    return options
+
+
+def _default_model() -> str:
+    mode = _current_mode()
+    if mode == "chat2api":
+        models = _account_pool_models()
+        return models[0] if models else MODEL
+    return "gpt-image-2"
+
+
+def _allowed_models() -> set[str]:
+    return {item["id"] for item in _model_options()}
+
+
+def _normalize_model(value: str | None) -> str:
+    model = (value or "").strip() or _default_model()
+    if model not in _allowed_models():
+        raise HTTPException(400, f"不支持的模型：{model}")
+    return model
+
+
+def _source_for_model(model: str) -> Literal["relay", "chat2api"]:
+    return "relay" if model in RELAY_ONLY_MODELS else "chat2api"
 
 
 def _public_mode_config() -> dict:
@@ -482,10 +543,12 @@ def _upstream_error_status(status_code: int) -> int:
     return 502 if status_code in {401, 403} else status_code
 
 
-async def generate_via_relay(req: GenerateRequest):
+async def generate_via_relay(req: GenerateRequest, model: str):
+    if _source_for_model(model) != "relay":
+        raise HTTPException(400, f"模型 {model} 需要账号池，请选择账号池模型生成")
     cfg = _require_relay_config()
 
-    payload: dict = {"model": cfg["model"], "prompt": req.prompt, "size": req.size, "n": req.n}
+    payload: dict = {"model": model, "prompt": req.prompt, "size": req.size, "n": req.n}
     if req.quality:
         payload["quality"] = req.quality
 
@@ -506,86 +569,29 @@ async def generate_via_relay(req: GenerateRequest):
 
 # ---------- chat2api mode (new, for free ChatGPT account via reverse proxy) ----------
 
-async def generate_via_chat2api(req: GenerateRequest):
+async def generate_via_chat2api(req: GenerateRequest, model: str):
+    if _source_for_model(model) != "chat2api":
+        raise HTTPException(400, f"模型 {model} 需要中转站，请选择 gpt-image-2")
     if not CHAT_KEY:
-        raise HTTPException(500, "CHAT_API_KEY not configured (.env)")
+        raise HTTPException(500, "账号池生图 key 未配置，请联系管理员")
 
     headers = {"Authorization": f"Bearer {CHAT_KEY}", "Content-Type": "application/json"}
-    image_urls: list[str] = []
-    attempts: list[dict] = []
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        for i in range(req.n):
-            # Chat-driven image gen does not have a native n parameter, so preserve
-            # the /api/generate contract by issuing one chat image request per image.
-            aug = req.prompt
-            if req.size and req.size != "auto":
-                aug = f"{aug}\n\n(Image size: {req.size})"
-            if req.n > 1:
-                aug = f"{aug}\n\n(Batch image {i + 1} of {req.n}; create one image.)"
+    payload = {"model": model, "prompt": req.prompt, "size": req.size, "n": req.n, "response_format": "b64_json"}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT, trust_env=False) as client:
+            r = await client.post(f"{CHAT_BASE}/images/generations", headers=headers, json=payload)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Upstream image error: {e}")
 
-            chat_payload = {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": aug}],
-                "stream": False,
-            }
-            try:
-                r = await client.post(f"{CHAT_BASE}/chat/completions", headers=headers, json=chat_payload)
-            except httpx.HTTPError as e:
-                raise HTTPException(502, f"Upstream chat error: {e}")
-
-            if r.status_code >= 400:
-                attempts.append({"status": r.status_code, "error": _safe_json(r), "stage": "chat_completion"})
-                continue
-
-            chat_resp = r.json()
-            try:
-                content = chat_resp["choices"][0]["message"]["content"] or ""
-            except (KeyError, IndexError, TypeError):
-                attempts.append({"error": "unexpected chat response shape", "raw": chat_resp})
-                continue
-
-            urls = extract_image_urls(content)
-            if not urls:
-                attempts.append(
-                    {
-                        "error": "Model returned no image.",
-                        "model_response": content[:800],
-                        "model": chat_resp.get("model"),
-                        "usage": chat_resp.get("usage"),
-                    }
-                )
-                continue
-            image_urls.extend(urls)
-            if len(image_urls) >= req.n:
-                break
-
-    if not image_urls:
-        first_status = next((a["status"] for a in attempts if isinstance(a.get("status"), int)), 502)
+    if r.status_code >= 400:
         return JSONResponse(
-            status_code=_upstream_error_status(first_status) if first_status >= 400 else 502,
-            content={
-                "error": {
-                    "message": "Model returned no image. Could mean image-gen not triggered, account lacks capability, or rate-limited.",
-                    "attempts": attempts,
-                }
-            },
+            status_code=_upstream_error_status(r.status_code),
+            content={"error": _safe_json(r), "upstream_status": r.status_code},
         )
-
-    # Download each image URL with system proxy (URLs are on OpenAI CDN, may need proxy from CN)
-    images = []
-    client_args: dict = {"timeout": TIMEOUT}
-    if PROXY:
-        client_args["proxy"] = PROXY
-    async with httpx.AsyncClient(**client_args) as client:
-        for url in image_urls[: req.n]:
-            item = await _download_image_url(client, url)
-            if "b64_json" in item:
-                item["revised_prompt"] = req.prompt
-            images.append(item)
-    for attempt in attempts:
-        images.append({"error": attempt.get("error") or attempt.get("stage") or "chat attempt failed"})
-
-    return {"created": int(time.time()), "data": images, "model": MODEL}
+    data = _safe_json(r)
+    if isinstance(data, dict) and not data.get("model"):
+        data["model"] = model
+    return data
 
 
 # ---------- routes ----------
@@ -593,16 +599,17 @@ async def generate_via_chat2api(req: GenerateRequest):
 @app.post("/api/generate")
 async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
     _enforce_user_rate_limit(ident, req.n)
-    mode = _current_mode()
+    model = _normalize_model(req.model)
+    mode = _source_for_model(model)
     started = time.perf_counter()
     status_code = 200
     result = None
     try:
         async with _image_semaphore:
             if mode == "chat2api":
-                result = await generate_via_chat2api(req)
+                result = await generate_via_chat2api(req, model)
             else:
-                result = await generate_via_relay(req)
+                result = await generate_via_relay(req, model)
         status_code = result.status_code if isinstance(result, JSONResponse) else 200
         return result
     except HTTPException as e:
@@ -635,17 +642,18 @@ async def edits(
     size: Annotated[str, Form()] = "1024x1024",
     n: Annotated[int, Form()] = 1,
     quality: Annotated[str | None, Form()] = None,
+    model: Annotated[str | None, Form()] = None,
     ident: dict = Depends(require_user),
 ):
-    if _current_mode() == "chat2api":
-        # chat2api supports multimodal upload via different mechanism — not implemented yet
-        raise HTTPException(501, "Image edits via chat2api mode not implemented yet — use relay mode for /edits")
+    selected_model = _normalize_model(model)
+    if _source_for_model(selected_model) != "relay":
+        raise HTTPException(400, "参考图仅支持 gpt-image-2 / 中转站")
 
     if n < 1 or n > 4:
         raise HTTPException(400, "n must be between 1 and 4")
 
     _enforce_user_rate_limit(ident, n)
-    mode = _current_mode()
+    mode = _source_for_model(selected_model)
     started = time.perf_counter()
     status_code = 200
     result = None
@@ -653,7 +661,7 @@ async def edits(
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
     content = await _read_edit_image(image)
     files = {"image": (image.filename or "ref.png", content, image.content_type or "image/png")}
-    data = {"model": cfg["model"], "prompt": prompt, "size": size, "n": str(n)}
+    data = {"model": selected_model, "prompt": prompt, "size": size, "n": str(n)}
     if quality:
         data["quality"] = quality
     try:
@@ -685,14 +693,19 @@ async def edits(
 async def health(_: dict = Depends(require_user)):
     relay = _public_relay_config()
     mode = _current_mode()
+    models = _model_options()
+    default_model = _default_model()
     return {
         "ok": True,
         "mode": mode,
-        "model": relay["model"] if mode == "relay" else MODEL,
-        "relay_base": relay["base_url"] if mode == "relay" else None,
-        "chat_base": CHAT_BASE if mode == "chat2api" else None,
-        "key_loaded": relay["key_loaded"] if mode == "relay" else bool(CHAT_KEY),
-        "edits_supported": mode == "relay",
+        "routing": "model",
+        "model": default_model,
+        "default_model": default_model,
+        "models": models,
+        "relay_base": relay["base_url"],
+        "chat_base": CHAT_BASE,
+        "key_loaded": any(item["ready"] for item in models),
+        "edits_supported": any(item["supports_edits"] and item["ready"] for item in models),
         "c2a_admin": bool(C2A_BASE and C2A_KEY),
     }
 
@@ -743,7 +756,7 @@ async def _c2a_raw_request(method: str, path: str, *, json_body: dict | None = N
     _ensure_c2a()
     url = f"{C2A_BASE}{path}"
     headers = {"Authorization": f"Bearer {C2A_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT, trust_env=False) as client:
         try:
             r = await client.request(method, url, headers=headers, json=json_body)
         except httpx.HTTPError as e:

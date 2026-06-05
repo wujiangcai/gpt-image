@@ -47,14 +47,31 @@ python main.py
 
 页面顶部会显示当前加载的 base 和 model，确认无误后开始用。
 
+## 首页模型选择与智能路由
+
+首页会从 `/api/health` 读取可用模型并显示「模型 / 来源」下拉框。后端按用户选择的模型自动路由：
+
+- `gpt-image-2`：固定走中转站 Relay，支持纯文本生图和参考图编辑。
+- `ACCOUNT_POOL_MODELS` 中配置的模型：走账号池 `CHAT_API_BASE` 的 `/images/generations`，适合使用 ChatGPT 账号池额度做纯文本生图。
+
+账号池模型可在 `.env` 配置，例如：
+
+```env
+CHAT_API_BASE=http://127.0.0.1:8001/v1
+CHAT_API_KEY=chatgpt2api 的 auth-key
+ACCOUNT_POOL_MODELS=gpt-4o-image,gpt-4o
+```
+
+参考图上传时，如果当前选择的不是 `gpt-image-2`，首页会自动切回 `gpt-image-2`；如果中转站未配置，会提示管理员配置中转站。
+
 ## 管理员配置生图来源
 
-打开 `/admin`，用管理员 token 登录后，先在「生图来源」里选择运行模式：
+打开 `/admin`，用管理员 token 登录后，「生图来源」仍保留为未选择模型时的默认/兼容配置：
 
-- `中转站 Relay`：通过 OpenAI 兼容图片接口生图，支持纯文本生图和参考图编辑。
-- `账号池 ChatGPT`：通过配置的 ChatGPT 账号池生图，只支持纯文本 prompt；参考图编辑会提示切回中转站模式。
+- `中转站 Relay`：默认使用 `gpt-image-2` 走 OpenAI 兼容图片接口。
+- `账号池 ChatGPT`：默认使用账号池模型走 `CHAT_API_BASE`。
 
-选择保存后立即生效，不需要重启服务。当前模式会保存到 `_auth.json` 的 `settings.mode` 字段；未保存时回退使用 `.env` 的 `MODE`。
+普通用户在首页显式选择模型时，以模型智能路由为准，不需要管理员来回切换全局来源。当前来源会保存到 `_auth.json` 的 `settings.mode` 字段；未保存时回退使用 `.env` 的 `MODE`。
 
 ## 管理员配置中转站
 
@@ -86,8 +103,8 @@ python main.py
 
 | 端点 | 用途 | 上游 |
 |------|------|------|
-| `POST /api/generate` | JSON 请求，纯文本 prompt 生图 | `{API_BASE}/generations` |
-| `POST /api/edits` | multipart 请求，带参考图 | `{API_BASE}/edits` |
+| `POST /api/generate` | JSON 请求，纯文本 prompt 生图；按 `model` 智能路由 | `gpt-image-2` → relay `/generations`；其他模型 → 账号池 `/images/generations` |
+| `POST /api/edits` | multipart 请求，带参考图；仅支持 `gpt-image-2` | relay `/edits` |
 | `GET /api/health` | 登录后健康检查 + 当前公开配置 | 本地 |
 | `GET /livez` | 无鉴权存活检查，只返回 `{ok:true}` | 本地 |
 | `GET /api/settings/relay` | 管理员查看中转站配置状态 | 本地 |
@@ -99,7 +116,7 @@ python main.py
 | `POST /api/accounts/cleanup` | 管理员预览或批量清理异常账号 | chatgpt2api |
 | `GET /api/usage` | 管理员查看本进程内请求/图片/失败统计 | 本地 |
 
-后端只做**转发**，不改请求体（除了把 model 字段从管理员配置或 `.env` 注入），上游返回什么就返回什么。
+后端只做**代理和路由**：`gpt-image-2` 会转发到中转站图片接口，账号池模型会转发到 `CHAT_API_BASE/images/generations`。API key 均只保存在服务端，不会暴露给浏览器。
 
 ## 切换中转商 / 切换官方
 
@@ -119,6 +136,8 @@ API Key: 中转商给的 key
 
 ## 重度生图使用说明
 
+- 首页支持模型选择并按模型智能路由：`gpt-image-2` 走中转站 Relay，其他 `ACCOUNT_POOL_MODELS` 走账号池 `/images/generations`。这样可以同时保留 image2 中转站能力和账号池额度能力。
+- 管理页的「生图来源」作为未选择模型时的默认/兼容配置保留；普通用户在首页选择模型后，以所选模型为准。
 - 管理员 token 和 `sk-app-*` 用户密钥都可以登录首页生图；只有管理员 token 能访问 `/admin`。
 - 首页支持两种任务模式：`单条` 适合反复打磨一个 prompt，`多行批量` 会把文本框里的每一行当作一个独立 prompt 排队生成。
 - `每个 prompt 出图` 会直接传给上游的 `n` 参数，一次请求最多 4 张；多行批量时总出图数 = prompt 行数 × 每行数量，失败任务会保留在页面上并支持单独或批量重试。
@@ -127,9 +146,9 @@ API Key: 中转商给的 key
 - 结果区支持单图下载、复用该图 prompt、复制图片地址/base64，以及 `下载全部`。`下载全部` 会在浏览器里打包成一个 ZIP，包含图片和 `manifest.txt`；如果远程图片因 CORS 无法抓取，会把失败 URL 写入 `failed-urls.txt`。
 - 历史记录保存 prompt 列表、尺寸、数量、质量、风格、成功/失败数量和是否含参考图，不保存完整图片数据，避免高频生图时撑爆浏览器 `localStorage`。
 - 如果上游中转站 API key 失效或被拒绝，前端不会再把当前登录密钥误判为失效。页面会显示生成失败，上游状态保存在响应里的 `upstream_status` 字段中。
-- 参考图只在 `relay` 模式可用。`chat2api` 模式下首页会提示当前模式暂不支持参考图，并阻止带参考图请求。
+- 参考图只支持 `gpt-image-2` / 中转站 Relay。上传参考图时，如果当前选择的是账号池模型，首页会自动切回 `gpt-image-2`；如果中转站未配置，会提示联系管理员配置。
 - 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。参考图模式同样支持 `n` 和 `quality` 透传。
-- `chat2api` 模式没有原生 `n` 参数，后端会为 `n>1` 顺序发起多次 chat image 请求，尽量保持 `/api/generate` 行为一致；部分失败会作为结果里的错误项返回，前端可对缺失图片重试。后端下载模型返回图片时会拦截私网/localhost 地址，并可用 `CHAT_IMAGE_HOST_ALLOWLIST` 限定可信 CDN 域名。
+- 账号池模型会直接调用 `CHAT_API_BASE/images/generations`，所以 `CHAT_API_BASE` 应指向支持 `/v1/images/generations` 的 chatgpt2api 服务，例如 `http://127.0.0.1:8001/v1`。本地访问账号池上游时会禁用系统代理，避免 `127.0.0.1` 被代理环境误拦截。
 - 后端默认开启基础保护：`USER_RATE_LIMIT_PER_MINUTE=30` 按用户限制每分钟图片单位，`MAX_CONCURRENT_IMAGE_REQUESTS=3` 控制全局同时生图请求数。团队共享或公网部署时建议按额度调小。
 - 管理员 token 日志只脱敏显示；`/api/accounts`、添加/刷新/删除账号相关响应会对 token 字段脱敏。账号列表里的删除操作使用服务端 `token_id` 临时映射，避免完整 ChatGPT access_token 进入页面 DOM。
 - `/admin` 的「运行概览」会展示当前进程内的请求数、请求图片数、成功/失败图片数、Top 用户和最近请求。该统计只保存在内存里，服务重启会清零；它用于轻量运维观察，不替代持久审计日志。

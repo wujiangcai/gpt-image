@@ -82,7 +82,7 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 <div class="card">
 <h2>生图来源</h2>
 <div class="tip">
-选择用户画图请求走中转站还是账号池。参考图编辑只支持 <strong>中转站 Relay</strong>。
+首页会按模型智能路由：<strong>gpt-image-2</strong> 走中转站 Relay，其他模型走账号池 ChatGPT。这里的来源设置作为未选择模型时的默认/兼容配置；参考图编辑只支持 <strong>gpt-image-2 / 中转站 Relay</strong>。
 </div>
 <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
   <div style="flex:1;min-width:260px">
@@ -352,12 +352,15 @@ async function loadAccounts(){
         <td>${escapeHtml(fmtDate(item.restoreAt))}</td>
         <td><span class="muted">${escapeHtml(item.token_masked || shortToken(item.access_token || ''))}</span></td>
         <td><div class="actions">
-          <button class="btn btn-danger" data-token-id="${escapeHtml(item.token_id || '')}" onclick="removeToken(${jsString(item.token_id || '')},${jsString(item.email || '')})" ${item.token_id ? '' : 'disabled'}>删除</button>
+          <button class="btn btn-danger account-delete-btn" data-token-id="${escapeHtml(item.token_id || '')}" data-email="${escapeHtml(item.email || '')}" ${item.token_id ? '' : 'disabled'}>删除</button>
         </div></td>
       </tr>`;
     }
     html += '</tbody></table></div>';
     $('accountsBox').innerHTML = html;
+    document.querySelectorAll('.account-delete-btn').forEach(btn => {
+      btn.addEventListener('click', () => removeToken(btn.dataset.tokenId || '', btn.dataset.email || ''));
+    });
   }catch(e){
     $('accountsBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</div>`;
   }

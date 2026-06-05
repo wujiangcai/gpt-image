@@ -99,6 +99,65 @@ class AdminFeatureTests(unittest.TestCase):
         data = r.json()
         self.assertNotIn("proxy", data)
 
+    def test_health_returns_model_routing_options(self):
+        r = self.client.get("/api/health", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["routing"], "model")
+        models = {item["id"]: item for item in data["models"]}
+        self.assertIn("gpt-image-2", models)
+        self.assertEqual(models["gpt-image-2"]["source"], "relay")
+        self.assertTrue(models["gpt-image-2"]["supports_edits"])
+        self.assertIn("gpt-4o-image", models)
+        self.assertEqual(models["gpt-4o-image"]["source"], "chat2api")
+        self.assertFalse(models["gpt-4o-image"]["supports_edits"])
+
+    def test_generate_routes_by_selected_model(self):
+        calls = []
+
+        async def fake_relay(req, model):
+            calls.append(("relay", model, req.prompt))
+            return {"data": [{"b64_json": "relay-image"}], "model": model}
+
+        async def fake_chat2api(req, model):
+            calls.append(("chat2api", model, req.prompt))
+            return {"data": [{"b64_json": "pool-image"}], "model": model}
+
+        with patch.object(self.main, "generate_via_relay", fake_relay), patch.object(self.main, "generate_via_chat2api", fake_chat2api):
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "relay image", "model": "gpt-image-2"},
+                headers=self.headers,
+            )
+            self.assertEqual(r.status_code, 200)
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "pool image", "model": "gpt-4o-image"},
+                headers=self.headers,
+            )
+            self.assertEqual(r.status_code, 200)
+
+        self.assertEqual(calls, [("relay", "gpt-image-2", "relay image"), ("chat2api", "gpt-4o-image", "pool image")])
+
+    def test_generate_rejects_unknown_model(self):
+        r = self.client.post(
+            "/api/generate",
+            json={"prompt": "test image", "model": "unknown-image-model"},
+            headers=self.headers,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("不支持的模型", r.json()["detail"])
+
+    def test_edits_rejects_account_pool_model(self):
+        r = self.client.post(
+            "/api/edits",
+            data={"prompt": "edit this", "size": "1024x1024", "n": "1", "model": "gpt-4o-image"},
+            files={"image": ("ref.png", b"png-bytes", "image/png")},
+            headers=self.headers,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("参考图仅支持", r.json()["detail"])
+
     def test_delete_accounts_falls_back_and_masks_tokens(self):
         calls = []
 
@@ -284,19 +343,8 @@ class AdminFeatureTests(unittest.TestCase):
                 return False
 
             async def post(self, url, headers=None, json=None, data=None, files=None):
-                idx = len(posts) + 1
                 posts.append({"url": url, "json": json, "headers": headers})
-                return FakeResponse(
-                    body={
-                        "choices": [
-                            {
-                                "message": {
-                                    "content": f"![generated](https://cdn.example/image-{idx}.png)"
-                                }
-                            }
-                        ]
-                    }
-                )
+                return FakeResponse(body={"data": [{"b64_json": "one"}, {"b64_json": "two"}, {"b64_json": "three"}]})
 
             def stream(self, method, url, follow_redirects=False):
                 gets.append(url)
@@ -312,30 +360,21 @@ class AdminFeatureTests(unittest.TestCase):
 
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(len(posts), 3)
-        self.assertEqual(len(gets), 3)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(gets), 0)
         self.assertEqual(len(data["data"]), 3)
-        self.assertEqual([p["url"] for p in posts], [f"{self.main.CHAT_BASE}/chat/completions"] * 3)
-        self.assertEqual(
-            [p["json"]["messages"][0]["content"] for p in posts],
-            [
-                "test image\n\n(Image size: 1024x1024)\n\n(Batch image 1 of 3; create one image.)",
-                "test image\n\n(Image size: 1024x1024)\n\n(Batch image 2 of 3; create one image.)",
-                "test image\n\n(Image size: 1024x1024)\n\n(Batch image 3 of 3; create one image.)",
-            ],
-        )
-        self.assertEqual([item["b64_json"] for item in data["data"]], ["aW1hZ2UtYnl0ZXMtMQ==", "aW1hZ2UtYnl0ZXMtMg==", "aW1hZ2UtYnl0ZXMtMw=="])
+        self.assertEqual(posts[0]["url"], f"{self.main.CHAT_BASE}/images/generations")
+        self.assertEqual(posts[0]["json"]["prompt"], "test image")
+        self.assertEqual(posts[0]["json"]["n"], 3)
+        self.assertEqual(posts[0]["json"]["size"], "1024x1024")
+        self.assertEqual([item["b64_json"] for item in data["data"]], ["one", "two", "three"])
 
     def test_generate_chat2api_partial_failure_returns_data_error_item(self):
         self._set_runtime_mode("chat2api")
         posts = []
         gets = []
         self.main.CHAT_IMAGE_HOST_ALLOWLIST.add("cdn.example")
-        chat_responses = [
-            {"status": 200, "body": {"choices": [{"message": {"content": "![one](https://cdn.example/one.png)"}}]}},
-            {"status": 503, "body": {"error": {"message": "temporarily unavailable"}}},
-            {"status": 200, "body": {"choices": [{"message": {"content": "![two](https://cdn.example/two.png)"}}]}},
-        ]
+        image_response = {"data": [{"b64_json": "one"}, {"error": {"message": "temporarily unavailable"}}, {"b64_json": "two"}]}
 
         class FakeResponse:
             def __init__(self, status_code=200, body=None, content=b""):
@@ -368,10 +407,8 @@ class AdminFeatureTests(unittest.TestCase):
                 return False
 
             async def post(self, url, headers=None, json=None, data=None, files=None):
-                idx = len(posts)
                 posts.append({"url": url, "json": json})
-                resp = chat_responses[idx]
-                return FakeResponse(status_code=resp["status"], body=resp["body"])
+                return FakeResponse(status_code=200, body=image_response)
 
             def stream(self, method, url, follow_redirects=False):
                 gets.append(url)
@@ -389,11 +426,11 @@ class AdminFeatureTests(unittest.TestCase):
         data = r.json()["data"]
         image_items = [item for item in data if "b64_json" in item]
         error_items = [item for item in data if "error" in item]
-        self.assertEqual(len(posts), 3)
-        self.assertEqual(len(gets), 2)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(gets), 0)
         self.assertEqual(len(image_items), 2)
         self.assertEqual(len(error_items), 1)
-        self.assertEqual(error_items[0]["error"], {"error": {"message": "temporarily unavailable"}})
+        self.assertEqual(error_items[0]["error"], {"message": "temporarily unavailable"})
 
     def test_generate_chat2api_blocks_private_image_urls(self):
         self._set_runtime_mode("chat2api")
@@ -418,7 +455,7 @@ class AdminFeatureTests(unittest.TestCase):
                 return False
 
             async def post(self, url, headers=None, json=None, data=None, files=None):
-                return FakeResponse(body={"choices": [{"message": {"content": "![bad](http://127.0.0.1/secret.png)"}}]})
+                return FakeResponse(status_code=502, body={"error": {"message": "blocked address"}})
 
             def stream(self, method, url, follow_redirects=False):
                 raise AssertionError("private URL should not be fetched")
@@ -430,8 +467,8 @@ class AdminFeatureTests(unittest.TestCase):
                 headers=self.headers,
             )
 
-        self.assertEqual(r.status_code, 200)
-        self.assertIn("blocked address", r.json()["data"][0]["error"])
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("blocked address", r.json()["error"]["error"]["message"])
 
     def test_generate_rate_limit_returns_429(self):
         self.main.USER_RATE_LIMIT_PER_MINUTE = 1

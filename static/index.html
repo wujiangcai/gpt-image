@@ -134,6 +134,13 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
     </div>
   </div>
 
+  <div>
+    <label for="modelSelect">模型 / 来源</label>
+    <select id="modelSelect">
+      <option value="">加载模型中…</option>
+    </select>
+  </div>
+
   <div class="row">
     <div>
       <label for="size">尺寸</label>
@@ -244,6 +251,7 @@ let activeLightboxSrc='';
 let activeController=null;
 let stopRequested=false;
 let healthLoaded=false;
+let modelOptions=[];
 
 const $=id=>document.getElementById(id);
 const refUploadArea=$('refUploadArea');
@@ -260,26 +268,75 @@ const refFileInput=$('refFileInput');
   loadHealth();
 })();
 
+function selectedModel(){
+  return $('modelSelect')?.value || '';
+}
+
+function selectedModelInfo(){
+  const model=selectedModel();
+  return modelOptions.find(item=>item.id===model)||null;
+}
+
+function relayModelReady(){
+  return modelOptions.some(item=>item.id==='gpt-image-2'&&item.ready);
+}
+
+function populateModelSelect(models,defaultModel){
+  modelOptions=Array.isArray(models)?models:[];
+  const select=$('modelSelect');
+  if(!modelOptions.length){
+    select.innerHTML='<option value="">无可用模型</option>';
+    select.disabled=true;
+    return;
+  }
+  select.disabled=false;
+  select.innerHTML=modelOptions.map(item=>{
+    const disabled=item.ready?'':' disabled';
+    const suffix=item.ready?'':'（未配置）';
+    return `<option value="${escapeHtml(item.id)}"${disabled}>${escapeHtml(item.label||item.id)}${suffix}</option>`;
+  }).join('');
+  const preferred=modelOptions.find(item=>item.id===defaultModel&&item.ready)||modelOptions.find(item=>item.ready)||modelOptions[0];
+  select.value=preferred.id;
+  setRefUploadEnabled(!!selectedModelInfo()?.supports_edits&&!!selectedModelInfo()?.ready);
+}
+
+function enforceReferenceModel({silent=false}={}){
+  if(!refImageFile)return true;
+  const info=selectedModelInfo();
+  if(info?.supports_edits&&info.ready)return true;
+  const select=$('modelSelect');
+  const relay=modelOptions.find(item=>item.id==='gpt-image-2'&&item.ready);
+  if(relay){
+    select.value='gpt-image-2';
+    setRefUploadEnabled(true);
+    if(!silent)showStatus('参考图仅支持 gpt-image-2，已自动切换到中转站','warn');
+    return true;
+  }
+  if(!silent)showStatus('参考图需要 gpt-image-2 / 中转站，但当前中转站未配置','danger');
+  return false;
+}
+
 async function loadHealth(){
   try{
     const res=await authedFetch(HEALTH_API_URL);
     const d=await res.json();
     if(!res.ok)throw new Error(d?.detail||`HTTP ${res.status}`);
     const el=$('configInfo');
+    populateModelSelect(d.models||[],d.default_model||d.model);
     if(!d.key_loaded){
       el.className='config-info err';
-      el.innerHTML='中转站 API key 未配置，请管理员进入 <code>/admin</code> 设置 API 路径、key 和模型';
+      el.innerHTML='暂无可用生图上游，请管理员进入 <code>/admin</code> 配置中转站或账号池';
       healthLoaded=true;
       setRefUploadEnabled(false);
       return;
     }
-    editsSupported=d.edits_supported!==false;
-    const endpoint=d.mode==='relay'?d.relay_base:d.chat_base;
-    const editsHint=editsSupported?'':'<br>当前模式暂不支持参考图，请移除参考图后生成';
+    editsSupported=relayModelReady();
+    const readyModels=modelOptions.filter(item=>item.ready).map(item=>item.id).join(' / ');
+    const editsHint=editsSupported?'参考图会自动使用 gpt-image-2 / 中转站':'<br>参考图需要 gpt-image-2 / 中转站，请联系管理员配置';
     el.className='config-info';
-    el.innerHTML=`后端代理已就绪<br>Mode: <code>${escapeHtml(d.mode)}</code> · Model: <code>${escapeHtml(d.model)}</code>${endpoint?` · API: <code>${escapeHtml(endpoint)}</code>`:''}${editsHint}`;
+    el.innerHTML=`后端代理已就绪<br>按模型智能路由：<code>gpt-image-2</code> 走中转站，其他模型走账号池<br>可用模型：<code>${escapeHtml(readyModels||'无')}</code><br>${editsHint}`;
     healthLoaded=true;
-    setRefUploadEnabled(editsSupported);
+    setRefUploadEnabled(!!selectedModelInfo()?.supports_edits&&!!selectedModelInfo()?.ready);
   }catch(e){
     editsSupported=false;
     healthLoaded=true;
@@ -297,9 +354,16 @@ function setRefUploadEnabled(enabled){
 
 function openRefPicker(e){
   if(e)e.stopPropagation();
-  if(healthLoaded&&!editsSupported){
-    showStatus('当前模式暂不支持参考图，请在管理员页切换到 relay 模式','danger');
-    return;
+  const info=selectedModelInfo();
+  if(healthLoaded&&(!info?.supports_edits||!info?.ready)){
+    if(relayModelReady()){
+      $('modelSelect').value='gpt-image-2';
+      setRefUploadEnabled(true);
+      showStatus('参考图仅支持 gpt-image-2，已自动切换到中转站','warn');
+    }else{
+      showStatus('参考图需要 gpt-image-2 / 中转站，请联系管理员配置','danger');
+      return;
+    }
   }
   refFileInput.value='';
   refFileInput.click();
@@ -340,7 +404,6 @@ document.addEventListener('paste',e=>{
 });
 
 function handleRefFile(file){
-  if(!editsSupported){showStatus('当前模式暂不支持参考图，请在管理员页切换到 relay 模式','danger');return}
   if(!file){showStatus('请选择图片文件','danger');return}
   if(!REF_IMAGE_TYPES.has(file.type)){showStatus('参考图仅支持 PNG、JPG、WEBP','danger');return}
   if(file.size===0){showStatus('图片文件为空，请重新选择','danger');return}
@@ -350,6 +413,11 @@ function handleRefFile(file){
   reader.onload=e=>{
     refImageFile=file;
     refImageBase64=e.target.result;
+    if(!enforceReferenceModel()){
+      refImageFile=null;
+      refImageBase64=null;
+      return;
+    }
     refPreviewImg.src=refImageBase64;
     refPreviewWrap.classList.add('active');
     refUploadArea.style.display='none';
@@ -407,6 +475,11 @@ function updatePromptStats(){
 $('prompt').addEventListener('input',updatePromptStats);
 $('promptMode').addEventListener('change',updatePromptStats);
 $('count').addEventListener('change',updatePromptStats);
+$('modelSelect').addEventListener('change',()=>{
+  const info=selectedModelInfo();
+  setRefUploadEnabled(!!info?.supports_edits&&!!info?.ready);
+  if(refImageFile)enforceReferenceModel();
+});
 updatePromptStats();
 
 function makeTasks(){
@@ -415,6 +488,7 @@ function makeTasks(){
   const style=$('style').value;
   const size=$('size').value;
   const quality=$('quality').value;
+  const model=selectedModel();
   return prompts.map((prompt,index)=>({
     id:`task-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
     prompt,
@@ -422,6 +496,7 @@ function makeTasks(){
     style,
     size,
     quality,
+    model,
     count,
     promptIndex:index,
     refFile:refImageFile,
@@ -442,10 +517,11 @@ function buildImageRequest(task){
     formData.append('size',task.size);
     formData.append('n',String(task.count));
     if(task.quality)formData.append('quality',task.quality);
+    if(task.model)formData.append('model',task.model);
     formData.append('image',task.refFile,task.refFile.name||'reference-image');
     return {url:EDITS_API_URL,options:{method:'POST',body:formData}};
   }
-  const body={prompt:task.fullPrompt,size:task.size,n:task.count};
+  const body={prompt:task.fullPrompt,size:task.size,n:task.count,model:task.model};
   if(task.quality)body.quality=task.quality;
   return {
     url:GENERATIONS_API_URL,
@@ -470,9 +546,10 @@ function stopGeneration(){
 
 async function generate(){
   if(generating)return;
-  const tasks=makeTasks();
+  let tasks=makeTasks();
   if(!tasks.length){showStatus('请输入 Prompt','danger');return}
-  if(tasks.some(t=>t.hasRef)&&!editsSupported){showStatus('当前模式暂不支持参考图，请移除参考图后再生成','danger');return}
+  if(tasks.some(t=>t.hasRef)&&!enforceReferenceModel())return;
+  if(tasks.some(t=>t.hasRef))tasks=makeTasks();
   if(!confirmLargeRun(tasks))return;
 
   currentResults=[];
@@ -485,6 +562,7 @@ async function generate(){
     count:parseInt($('count').value,10)||1,
     style:$('style').value,
     quality:$('quality').value,
+    model:selectedModel(),
     hasRef:!!refImageFile
   };
   $('imagesGrid').innerHTML='';
@@ -580,9 +658,11 @@ function renderRunMeta(tasks,expected){
   }
   const first=tasks[0];
   const quality=first.quality||'默认';
+  const model=first.model||selectedModel()||'默认';
   $('runMeta').innerHTML=[
     `<span class="pill">${tasks.length} 个任务</span>`,
     `<span class="pill">预计 ${expected} 张</span>`,
+    `<span class="pill">${escapeHtml(model)}</span>`,
     `<span class="pill">${escapeHtml(first.size)}</span>`,
     `<span class="pill">质量 ${escapeHtml(quality)}</span>`,
     first.hasRef?'<span class="pill">参考图</span>':''
@@ -614,6 +694,7 @@ function extractImages(data,task){
         fullPrompt:task.fullPrompt,
         size:task.size,
         quality:task.quality,
+        model:task.model,
         promptIndex:task.promptIndex,
         imageIndex:index,
         revisedPrompt:item?.revised_prompt||''
@@ -634,7 +715,7 @@ function addImageCard(item){
 
   const meta=document.createElement('div');
   meta.className='img-meta';
-  meta.innerHTML=`<span>#${item.promptIndex+1}</span><span>${escapeHtml(item.size)}</span>`;
+  meta.innerHTML=`<span>#${item.promptIndex+1}</span><span>${escapeHtml(item.model||'')}</span><span>${escapeHtml(item.size)}</span>`;
 
   const acts=document.createElement('div');
   acts.className='actions';
@@ -920,6 +1001,7 @@ function saveHistory(entry){
     count:entry.count,
     style:entry.style,
     quality:entry.quality,
+    model:entry.model,
     time:new Date().toLocaleString(),
     hasRef:entry.hasRef,
     success:entry.success,
@@ -949,7 +1031,7 @@ function renderHistory(){
     const prompts=h.prompts||[h.prompt||''];
     const label=prompts.length>1?`${prompts.length} 项`:'单条';
     const success=h.success??h.count??0;
-    return `<div class="history-item" onclick="reuse(${i})"><div class="mark">${escapeHtml(label)}</div><div class="info"><p>${escapeHtml(prompts[0]||'')}</p><span>${escapeHtml(h.size||'')} · ${escapeHtml(h.time||'')}${success?` · ${success}张`:''}${h.failed?` · 失败${h.failed}`:''}${h.hasRef?' · 参考图':''}</span></div></div>`;
+    return `<div class="history-item" onclick="reuse(${i})"><div class="mark">${escapeHtml(label)}</div><div class="info"><p>${escapeHtml(prompts[0]||'')}</p><span>${escapeHtml(h.model||'默认模型')} · ${escapeHtml(h.size||'')} · ${escapeHtml(h.time||'')}${success?` · ${success}张`:''}${h.failed?` · 失败${h.failed}`:''}${h.hasRef?' · 参考图':''}</span></div></div>`;
   }).join('');
 }
 
@@ -961,6 +1043,7 @@ function reuse(idx){
   $('promptMode').value=prompts.length>1?'lines':(h.promptMode||'single');
   $('prompt').value=prompts.join('\n');
   if(h.size)$('size').value=h.size;
+  if(h.model&&Array.from($('modelSelect').options).some(opt=>opt.value===h.model&&!opt.disabled))$('modelSelect').value=h.model;
   if(h.count)$('count').value=String(Math.min(Math.max(parseInt(h.count,10)||1,1),4));
   $('style').value=h.style||'';
   $('quality').value=h.quality||'';
