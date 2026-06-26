@@ -35,7 +35,7 @@ IMAGE_API_BASE=https://otokapi.com/v1/images   # 改成你中转商的图片 API
 IMAGE_MODEL=gpt-image-2                         # 改成你中转商支持的模型
 ```
 
-如果 `.env` 未设置 `ADMIN_TOKEN`，服务首次启动会在日志里生成一个管理员 token，并保存到 `_auth.json`。
+如果 `.env` 未设置 `ADMIN_TOKEN`，服务首次启动会生成一个管理员 token，并保存到 `_auth.json`；日志只会脱敏显示，完整值请从 `_auth.json` 查看。
 
 启动：
 
@@ -47,14 +47,31 @@ python main.py
 
 页面顶部会显示当前加载的 base 和 model，确认无误后开始用。
 
+## 首页模型选择与智能路由
+
+首页会从 `/api/health` 读取可用模型并显示「模型 / 来源」下拉框。后端按用户选择的模型自动路由：
+
+- `gpt-image-2`：固定走中转站 Relay，支持纯文本生图和参考图编辑。
+- `ACCOUNT_POOL_MODELS` 中配置的模型：走账号池 `CHAT_API_BASE` 的 `/images/generations`，适合使用 ChatGPT 账号池额度做纯文本生图。
+
+账号池模型可在 `.env` 配置，例如：
+
+```env
+CHAT_API_BASE=http://127.0.0.1:8001/v1
+CHAT_API_KEY=chatgpt2api 的 auth-key
+ACCOUNT_POOL_MODELS=gpt-4o-image,gpt-4o
+```
+
+参考图上传时，如果当前选择的不是 `gpt-image-2`，首页会自动切回 `gpt-image-2`；如果中转站未配置，会提示管理员配置中转站。
+
 ## 管理员配置生图来源
 
-打开 `/admin`，用管理员 token 登录后，先在「生图来源」里选择运行模式：
+打开 `/admin`，用管理员 token 登录后，「生图来源」仍保留为未选择模型时的默认/兼容配置：
 
-- `中转站 Relay`：通过 OpenAI 兼容图片接口生图，支持纯文本生图和参考图编辑。
-- `账号池 ChatGPT`：通过配置的 ChatGPT 账号池生图，只支持纯文本 prompt；参考图编辑会提示切回中转站模式。
+- `中转站 Relay`：默认使用 `gpt-image-2` 走 OpenAI 兼容图片接口。
+- `账号池 ChatGPT`：默认使用账号池模型走 `CHAT_API_BASE`。
 
-选择保存后立即生效，不需要重启服务。当前模式会保存到 `_auth.json` 的 `settings.mode` 字段；未保存时回退使用 `.env` 的 `MODE`。
+普通用户在首页显式选择模型时，以模型智能路由为准，不需要管理员来回切换全局来源。当前来源会保存到 `_auth.json` 的 `settings.mode` 字段；未保存时回退使用 `.env` 的 `MODE`。
 
 ## 管理员配置中转站
 
@@ -64,7 +81,7 @@ python main.py
 - `模型`：例如 `gpt-image-2`
 - `API Key`：中转站提供的 key
 
-保存后立即生效，不需要重启服务。`API Key` 不会回显给前端，普通用户只能通过 `/api/health` 看到是否已配置。管理员配置会保存到 `_auth.json` 的 `relay` 字段；如果未保存管理员配置，则回退使用 `.env` 里的 `IMAGE_API_BASE`、`IMAGE_API_KEY`、`IMAGE_MODEL`。
+保存后立即生效，不需要重启服务。`API Key` 不会回显给前端，普通用户登录后只能通过 `/api/health` 看到是否已配置。管理员配置会保存到 `_auth.json` 的 `relay` 字段；如果未保存管理员配置，则回退使用 `.env` 里的 `IMAGE_API_BASE`、`IMAGE_API_KEY`、`IMAGE_MODEL`。
 
 ## 账号池管理
 
@@ -76,7 +93,7 @@ python main.py
 - `清理异常账号`：删除状态不是 `normal`/`正常` 的账号。
 - `包含零额度`：勾选后也会清理图片剩余额度为 0 的账号。
 
-预览和清理结果只显示脱敏 token，不会把完整 `access_token` 回显到页面。
+预览和清理结果只显示脱敏 token，不会把完整 `access_token` 回显到页面。账号列表也只返回脱敏 token 和服务端生成的 `token_id`；删除/同步额度时浏览器提交 `token_id`，后端再临时向账号池查询并映射到完整 token，避免完整 ChatGPT access_token 进入页面 DOM 或日志。
 
 ## 用户密钥
 
@@ -86,9 +103,10 @@ python main.py
 
 | 端点 | 用途 | 上游 |
 |------|------|------|
-| `POST /api/generate` | JSON 请求，纯文本 prompt 生图 | `{API_BASE}/generations` |
-| `POST /api/edits` | multipart 请求，带参考图 | `{API_BASE}/edits` |
-| `GET /api/health` | 健康检查 + 当前公开配置 | 本地 |
+| `POST /api/generate` | JSON 请求，纯文本 prompt 生图；按 `model` 智能路由 | `gpt-image-2` → relay `/generations`；其他模型 → 账号池 `/images/generations` |
+| `POST /api/edits` | multipart 请求，带参考图；仅支持 `gpt-image-2` | relay `/edits` |
+| `GET /api/health` | 登录后健康检查 + 当前公开配置 | 本地 |
+| `GET /livez` | 无鉴权存活检查，只返回 `{ok:true}` | 本地 |
 | `GET /api/settings/relay` | 管理员查看中转站配置状态 | 本地 |
 | `PUT /api/settings/relay` | 管理员保存中转站 API 路径 / 模型 / key | 本地 |
 | `GET /api/settings/mode` | 管理员查看当前生图来源 | 本地 |
@@ -96,8 +114,9 @@ python main.py
 | `GET /api/accounts` | 管理员查看账号池 | chatgpt2api |
 | `POST /api/accounts/remove` | 管理员删除账号，带兼容 fallback | chatgpt2api |
 | `POST /api/accounts/cleanup` | 管理员预览或批量清理异常账号 | chatgpt2api |
+| `GET /api/usage` | 管理员查看本进程内请求/图片/失败统计 | 本地 |
 
-后端只做**转发**，不改请求体（除了把 model 字段从管理员配置或 `.env` 注入），上游返回什么就返回什么。
+后端只做**代理和路由**：`gpt-image-2` 会转发到中转站图片接口，账号池模型会转发到 `CHAT_API_BASE/images/generations`。API key 均只保存在服务端，不会暴露给浏览器。
 
 ## 切换中转商 / 切换官方
 
@@ -115,20 +134,41 @@ API Key: 中转商给的 key
 
 也可以修改 `.env` 作为默认值，然后重启服务；但一旦 `/admin` 保存过配置，运行时会优先使用 `_auth.json` 里的管理员配置。
 
+## 重度生图使用说明
+
+- 首页支持模型选择并按模型智能路由：`gpt-image-2` 走中转站 Relay，其他 `ACCOUNT_POOL_MODELS` 走账号池 `/images/generations`。这样可以同时保留 image2 中转站能力和账号池额度能力。
+- 管理页的「生图来源」作为未选择模型时的默认/兼容配置保留；普通用户在首页选择模型后，以所选模型为准。
+- 管理员 token 和 `sk-app-*` 用户密钥都可以登录首页生图；只有管理员 token 能访问 `/admin`。
+- 首页支持两种任务模式：`单条` 适合反复打磨一个 prompt，`多行批量` 会把文本框里的每一行当作一个独立 prompt 排队生成。
+- `每个 prompt 出图` 会直接传给上游的 `n` 参数，一次请求最多 4 张；多行批量时总出图数 = prompt 行数 × 每行数量，失败任务会保留在页面上并支持单独或批量重试。
+- 批量队列开始前会对很大的任务量二次确认；运行中可点 `停止` 中止后续队列，已生成结果会保留。上游只返回部分图片时，页面会把缺失张数作为可重试任务，避免整条 prompt 重新消耗额度。
+- `质量` 会透传为上游图片接口的 `quality` 参数；不确定中转商是否支持时选 `默认`，避免额外参数导致 400。
+- 结果区支持单图下载、复用该图 prompt、复制图片地址/base64，以及 `下载全部`。`下载全部` 会在浏览器里打包成一个 ZIP，包含图片和 `manifest.txt`；如果远程图片因 CORS 无法抓取，会把失败 URL 写入 `failed-urls.txt`。
+- 历史记录保存 prompt 列表、尺寸、数量、质量、风格、成功/失败数量和是否含参考图，不保存完整图片数据，避免高频生图时撑爆浏览器 `localStorage`。
+- 如果上游中转站 API key 失效或被拒绝，前端不会再把当前登录密钥误判为失效。页面会显示生成失败，上游状态保存在响应里的 `upstream_status` 字段中。
+- 参考图只支持 `gpt-image-2` / 中转站 Relay。上传参考图时，如果当前选择的是账号池模型，首页会自动切回 `gpt-image-2`；如果中转站未配置，会提示联系管理员配置。
+- 参考图上传默认限制为 10MB，可用 `MAX_EDIT_IMAGE_BYTES` 调整。浏览器会限制 PNG/JPG/WEBP；后端也会拒绝明确的非图片 MIME 类型，同时兼容部分客户端上传时使用的 `application/octet-stream`。参考图模式同样支持 `n` 和 `quality` 透传。
+- 账号池模型会直接调用 `CHAT_API_BASE/images/generations`，所以 `CHAT_API_BASE` 应指向支持 `/v1/images/generations` 的 chatgpt2api 服务，例如 `http://127.0.0.1:8001/v1`。本地访问账号池上游时会禁用系统代理，避免 `127.0.0.1` 被代理环境误拦截。
+- 后端默认开启基础保护：`USER_RATE_LIMIT_PER_MINUTE=30` 按用户限制每分钟图片单位，`MAX_CONCURRENT_IMAGE_REQUESTS=3` 控制全局同时生图请求数。团队共享或公网部署时建议按额度调小。
+- 管理员 token 日志只脱敏显示；`/api/accounts`、添加/刷新/删除账号相关响应会对 token 字段脱敏。账号列表里的删除操作使用服务端 `token_id` 临时映射，避免完整 ChatGPT access_token 进入页面 DOM。
+- `/admin` 的「运行概览」会展示当前进程内的请求数、请求图片数、成功/失败图片数、Top 用户和最近请求。该统计只保存在内存里，服务重启会清零；它用于轻量运维观察，不替代持久审计日志。
+
 ## 本地验证
 
 ```bash
 python -m py_compile main.py tests/test_admin_features.py
 .venv\Scripts\python.exe -m unittest tests.test_admin_features
+node --check static/auth.js
+node -e "const fs=require('fs'); const html=fs.readFileSync('static/index.html','utf8'); const scripts=[]; let rest=html; while(true){ const a=rest.indexOf('<script>'); if(a<0) break; const b=rest.indexOf('</script>', a); scripts.push(rest.slice(a+8,b)); rest=rest.slice(b+9); } for (const s of scripts) new Function(s); console.log('inline scripts ok:', scripts.length);"
 ```
 
-`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、异常账号预览/清理与 token 脱敏。
+`tests/test_admin_features.py` 覆盖：运行时生图来源保存与 `/api/health` 同步、账号删除 fallback、账号 `token_id` 删除/同步与 token 脱敏、异常账号预览/清理、管理员使用统计、上游认证失败状态映射、纯文本生成的 `n`/`quality` 转发、参考图上传字段和后端校验。
 
 ## 常见错误排查
 
 页面顶部红条显示 `中转站 API key 未配置` → 用管理员 token 登录 `/admin`，在「中转站生图设置」里填写 API Key；或检查 `.env` 的 `IMAGE_API_KEY`。
 
-生成时 `[401] Unauthorized` → key 错了，或者中转商认证方式不是 `Bearer`（需要改 main.py 的 headers）。
+`[502] 上游认证失败 / upstream_status: 401 或 403` → 登录密钥是有效的，但中转站或 ChatGPT 上游 key 被拒绝。去 `/admin` 检查中转站 API Key、路径和模型。
 
 `[404] Not Found` → base URL 路径错了，常见错误：少了 `/v1/images`，或多带了末尾斜杠（代码会去掉斜杠，但路径段错了无法挽救）。
 

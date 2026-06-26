@@ -59,6 +59,13 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 .tip{background:rgba(124,92,252,0.06);border:1px solid rgba(124,92,252,0.2);border-radius:10px;padding:12px 14px;font-size:.78rem;color:var(--text2);line-height:1.6;margin-bottom:14px}
 .tip code{background:var(--surface2);padding:1px 6px;border-radius:4px;color:var(--accent2);font-size:.72rem}
 .tip strong{color:var(--text)}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px}
+.stat{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px}
+.stat .num{font-size:1.25rem;font-weight:700;color:var(--accent2);margin-bottom:4px}
+.stat .label{font-size:.72rem;color:var(--text2)}
+.recent-list{display:flex;flex-direction:column;gap:8px;font-size:.78rem}
+.recent-item{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--border);padding-bottom:8px}
+.recent-item:last-child{border-bottom:none;padding-bottom:0}
 </style>
 </head>
 <body>
@@ -75,7 +82,7 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 <div class="card">
 <h2>生图来源</h2>
 <div class="tip">
-选择用户画图请求走中转站还是账号池。参考图编辑只支持 <strong>中转站 Relay</strong>。
+首页会按模型智能路由：<strong>gpt-image-2</strong> 走中转站 Relay，其他模型走账号池 ChatGPT。这里的来源设置作为未选择模型时的默认/兼容配置；参考图编辑只支持 <strong>gpt-image-2 / 中转站 Relay</strong>。
 </div>
 <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
   <div style="flex:1;min-width:260px">
@@ -152,11 +159,16 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 </div>
 
 <div class="card">
+<h2>运行概览</h2>
+<div id="usageBox"><div class="empty">加载中…</div></div>
+</div>
+
+<div class="card">
 <h2>用户密钥管理</h2>
 <div class="tip">
 为同事/自己创建独立的访问密钥（<code>sk-app-*</code>）。这些密钥可以画图但<strong>不能</strong>看本页面。可以自动生成密钥，也可以粘贴已有 API key 作为用户登录密钥。
 </div>
-<div style="display:grid;grid-template-columns:minmax(200px,1fr) minmax(260px,1.4fr) auto;gap:10px;align-items:end;margin-bottom:14px">
+<div style="display:grid;grid-template-columns:minmax(180px,1fr) minmax(240px,1.2fr) minmax(140px,.7fr) auto;gap:10px;align-items:end;margin-bottom:14px">
 <div>
 <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">用户名（备注）</label>
 <input type="text" id="newUserName" placeholder="例如：张三 / 同事A" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:.85rem;outline:none;box-sizing:border-box">
@@ -164,6 +176,10 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 <div>
 <label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">用户 API Key（可选）</label>
 <input type="password" id="newUserKey" placeholder="留空自动生成 sk-app-*">
+</div>
+<div>
+<label style="font-size:.78rem;color:var(--text2);display:block;margin-bottom:4px">允许生图次数</label>
+<input type="number" id="newUserAllowedCount" min="0" placeholder="留空=不限">
 </div>
 <button class="btn btn-primary" id="createUserBtn" onclick="createUser()"><span class="spinner"></span><span>创建用户密钥</span></button>
 </div>
@@ -183,6 +199,14 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 <script src="/static/auth.js"></script>
 <script>
 const $ = id => document.getElementById(id);
+
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function jsString(value){
+  return JSON.stringify(String(value ?? ''));
+}
 
 function toast(msg, type='info', ttl=3500){
   const el = $('toast');
@@ -205,10 +229,11 @@ function fmtDate(iso){
 }
 
 function statusBadge(s){
+  const value = escapeHtml(s || '未知');
   if(!s) return '<span class="badge b-err">未知</span>';
-  if(s.includes('正常') || s === 'normal') return `<span class="badge b-ok">${s}</span>`;
-  if(s.includes('限流') || s.includes('rate')) return `<span class="badge b-warn">${s}</span>`;
-  return `<span class="badge b-err">${s}</span>`;
+  if(s.includes('正常') || s === 'normal') return `<span class="badge b-ok">${value}</span>`;
+  if(s.includes('限流') || s.includes('rate')) return `<span class="badge b-warn">${value}</span>`;
+  return `<span class="badge b-err">${value}</span>`;
 }
 
 function quotaCell(item){
@@ -217,7 +242,7 @@ function quotaCell(item){
   let cls = 'quota';
   if(remaining === 0) cls += ' zero';
   else if(remaining <= 1) cls += ' low';
-  return `<span class="${cls}">${remaining}</span><div class="muted">${item.quota ?? '?'} / day</div>`;
+  return `<span class="${cls}">${escapeHtml(remaining)}</span><div class="muted">${escapeHtml(item.quota ?? '?')} / day</div>`;
 }
 
 function shortToken(t){
@@ -324,21 +349,24 @@ async function loadAccounts(){
       + '</tr></thead><tbody>';
     for(const item of items){
       html += `<tr>
-        <td><span class="email">${item.email || '-'}</span></td>
-        <td><span class="badge b-type">${item.type || '-'}</span></td>
+        <td><span class="email">${escapeHtml(item.email || '-')}</span></td>
+        <td><span class="badge b-type">${escapeHtml(item.type || '-')}</span></td>
         <td>${statusBadge(item.status)}</td>
         <td>${quotaCell(item)}</td>
-        <td>${fmtDate(item.restoreAt)}</td>
-        <td><span class="muted" title="${item.access_token||''}">${shortToken(item.access_token)}</span></td>
+        <td>${escapeHtml(fmtDate(item.restoreAt))}</td>
+        <td><span class="muted">${escapeHtml(item.token_masked || shortToken(item.access_token || ''))}</span></td>
         <td><div class="actions">
-          <button class="btn btn-danger" onclick="removeToken('${(item.access_token||'').replace(/'/g,"\\'")}','${item.email||''}')">删除</button>
+          <button class="btn btn-danger account-delete-btn" data-token-id="${escapeHtml(item.token_id || '')}" data-email="${escapeHtml(item.email || '')}" ${item.token_id ? '' : 'disabled'}>删除</button>
         </div></td>
       </tr>`;
     }
     html += '</tbody></table></div>';
     $('accountsBox').innerHTML = html;
+    document.querySelectorAll('.account-delete-btn').forEach(btn => {
+      btn.addEventListener('click', () => removeToken(btn.dataset.tokenId || '', btn.dataset.email || ''));
+    });
   }catch(e){
-    $('accountsBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${e.message}</div>`;
+    $('accountsBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -359,6 +387,7 @@ async function addTokens(){
     toast(`成功添加 ${d.added || 0}，跳过 ${d.skipped || 0}`, 'success');
     $('tokensInput').value = '';
     await loadAccounts();
+    await loadUsage();
   }catch(e){
     toast('添加失败：' + e.message, 'error');
   }finally{
@@ -366,13 +395,14 @@ async function addTokens(){
   }
 }
 
-async function removeToken(token, email){
+async function removeToken(tokenId, email){
+  if(!tokenId){ toast('账号缺少安全删除标识，请刷新列表后重试', 'error'); return; }
   if(!confirm(`确认删除账号 ${email || '该账号'} 吗？`)) return;
   try{
     const r = await authedFetch('/api/accounts/remove', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({tokens:[token]})
+      body: JSON.stringify({token_ids:[tokenId]})
     });
     const d = await r.json();
     if(!r.ok){ throw new Error(errMsg(d)); }
@@ -380,6 +410,7 @@ async function removeToken(token, email){
     const failed = d.failed ?? 0;
     toast(failed ? `删除失败 ${failed} 个` : `已删除 ${deleted || 1} 个账号`, failed ? 'error' : 'success');
     await loadAccounts();
+    await loadUsage();
   }catch(e){
     toast('删除失败：' + e.message, 'error');
   }
@@ -404,7 +435,7 @@ function renderCleanupPreview(d){
     box.innerHTML = '没有发现需要清理的异常账号。';
     return;
   }
-  const rows = items.slice(0, 8).map(x => `${x.email || '-'} / ${x.status || '未知'} / 剩余额度 ${x.remaining ?? '-'} / ${x.token || ''}`);
+  const rows = items.slice(0, 8).map(x => `${escapeHtml(x.email || '-')} / ${escapeHtml(x.status || '未知')} / 剩余额度 ${escapeHtml(x.remaining ?? '-')} / ${escapeHtml(x.token || '')}`);
   const more = items.length > rows.length ? `<br>还有 ${items.length - rows.length} 个未显示。` : '';
   box.style.display = 'block';
   box.innerHTML = `<strong>将清理 ${items.length} 个账号：</strong><br>${rows.join('<br>')}${more}`;
@@ -436,6 +467,7 @@ async function cleanupAccounts(){
     if(!d.ok) throw new Error('上游删除失败');
     toast(`已清理 ${d.deleted || 0} 个异常账号`, 'success');
     await loadAccounts();
+    await loadUsage();
   }catch(e){
     toast('清理失败：' + e.message, 'error');
   }finally{
@@ -447,15 +479,17 @@ async function refreshAll(){
   const btn = $('refreshAllBtn');
   btn.classList.add('loading'); btn.disabled = true;
   try{
+    const ids = Array.from(document.querySelectorAll('[data-token-id]')).map(el=>el.dataset.tokenId).filter(Boolean);
     const r = await authedFetch('/api/accounts/refresh', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({tokens:[]})
+      body: JSON.stringify({token_ids:ids})
     });
     const d = await r.json();
     if(!r.ok){ throw new Error(errMsg(d)); }
     toast(`已同步 ${d.refreshed || 0} 个账号`, 'success');
     await loadAccounts();
+    await loadUsage();
   }catch(e){
     toast('同步失败：' + e.message, 'error');
   }finally{
@@ -480,6 +514,12 @@ function fmtCreated(iso){
   catch(e){ return iso.slice(0,19).replace('T',' '); }
 }
 
+function userQuotaText(u){
+  const used = Number(u.used_count || 0);
+  if(u.allowed_count === null || u.allowed_count === undefined) return `已用 ${used} / 不限`;
+  return `已用 ${used} / ${u.allowed_count}，剩余 ${u.remaining_count ?? 0}`;
+}
+
 async function loadUsers(){
   $('usersBox').innerHTML = '<div class="empty">加载中…</div>';
   try{
@@ -492,48 +532,58 @@ async function loadUsers(){
       return;
     }
     let html='<div style="overflow-x:auto"><table><thead><tr>'
-      +'<th>用户名</th><th>密钥</th><th>状态</th><th>创建时间</th><th>最后使用</th><th></th>'
+      +'<th>用户名</th><th>密钥</th><th>额度</th><th>状态</th><th>创建时间</th><th>最后使用</th><th></th>'
       +'</tr></thead><tbody>';
     for(const u of items){
       const enabled = u.enabled !== false;
       html+=`<tr>
-        <td><strong>${u.name||'-'}</strong></td>
+        <td><strong>${escapeHtml(u.name||'-')}</strong></td>
         <td><div style="display:flex;gap:6px;align-items:center">
-          <code style="font-family:'SF Mono',Consolas,monospace;font-size:.72rem;color:var(--accent2);background:var(--surface2);padding:3px 8px;border-radius:5px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${u.key}</code>
-          <button class="btn btn-secondary" onclick="copyText('${u.key}')" style="padding:4px 8px;font-size:.7rem">复制</button>
+          <code style="font-family:'SF Mono',Consolas,monospace;font-size:.72rem;color:var(--accent2);background:var(--surface2);padding:3px 8px;border-radius:5px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(u.key)}</code>
+          <button class="btn btn-secondary" onclick="copyText(${jsString(u.key)})" style="padding:4px 8px;font-size:.7rem">复制</button>
         </div></td>
+        <td><span class="muted">${escapeHtml(userQuotaText(u))}</span></td>
         <td>${enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">禁用</span>'}</td>
-        <td><span class="muted">${fmtCreated(u.created)}</span></td>
-        <td><span class="muted">${fmtCreated(u.last_used)}</span></td>
+        <td><span class="muted">${escapeHtml(fmtCreated(u.created))}</span></td>
+        <td><span class="muted">${escapeHtml(fmtCreated(u.last_used))}</span></td>
         <td><div class="actions">
-          <button class="btn btn-secondary" onclick="toggleUser('${u.id}',${!enabled})" style="padding:5px 10px;font-size:.72rem">${enabled?'禁用':'启用'}</button>
-          <button class="btn btn-danger" onclick="deleteUser('${u.id}','${(u.name||'').replace(/'/g,"\\'")}')">删除</button>
+          <button class="btn btn-secondary" onclick="setUserQuota(${jsString(u.id)},${u.allowed_count === null || u.allowed_count === undefined ? 'null' : Number(u.allowed_count)})" style="padding:5px 10px;font-size:.72rem">改额度</button>
+          <button class="btn btn-secondary" onclick="toggleUser(${jsString(u.id)},${!enabled})" style="padding:5px 10px;font-size:.72rem">${enabled?'禁用':'启用'}</button>
+          <button class="btn btn-danger" onclick="deleteUser(${jsString(u.id)},${jsString(u.name||'')})">删除</button>
         </div></td>
       </tr>`;
     }
     html+='</tbody></table></div>';
     $('usersBox').innerHTML = html;
   }catch(e){
-    $('usersBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${e.message}</div>`;
+    $('usersBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</div>`;
   }
 }
 
 async function createUser(){
   const name = $('newUserName').value.trim();
   const key = $('newUserKey').value.trim();
+  const allowedRaw = $('newUserAllowedCount').value.trim();
   if(!name){ toast('请填用户名','error'); return; }
+  const payload = {name, key};
+  if(allowedRaw !== ''){
+    const allowed = Number(allowedRaw);
+    if(!Number.isInteger(allowed) || allowed < 0){ toast('允许生图次数必须是非负整数','error'); return; }
+    payload.allowed_count = allowed;
+  }
   const btn = $('createUserBtn');
   btn.classList.add('loading'); btn.disabled = true;
   try{
     const r = await authedFetch('/api/users',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, key})
+      body: JSON.stringify(payload)
     });
     const d = await r.json();
     if(!r.ok) throw new Error(errMsg(d, '创建失败'));
     $('newUserName').value = '';
     $('newUserKey').value = '';
+    $('newUserAllowedCount').value = '';
     $('newKeyValue').textContent = d.key;
     $('newKeyAlert').style.display = 'block';
     toast(`已创建用户密钥：${d.name}`,'success');
@@ -574,6 +624,55 @@ async function toggleUser(id, enabled){
   }
 }
 
+async function setUserQuota(id, currentAllowed){
+  const input = prompt('请输入允许生图次数，留空表示不限', currentAllowed == null ? '' : String(currentAllowed));
+  if(input === null) return;
+  const trimmed = input.trim();
+  const payload = trimmed === '' ? {quota_unlimited:true} : {allowed_count:Number(trimmed)};
+  if(trimmed !== '' && (!Number.isInteger(payload.allowed_count) || payload.allowed_count < 0)){
+    toast('允许生图次数必须是非负整数','error');
+    return;
+  }
+  try{
+    const r = await authedFetch('/api/users/'+id,{
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(errMsg(d, '更新失败'));
+    toast('额度已更新','success');
+    await loadUsers();
+  }catch(e){
+    toast('更新失败：'+e.message,'error');
+  }
+}
+
+async function loadUsage(){
+  const box = $('usageBox');
+  if(!box) return;
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try{
+    const r = await authedFetch('/api/usage');
+    const d = await r.json();
+    if(!r.ok) throw new Error(errMsg(d));
+    const users = (d.users || []).slice(0, 5);
+    const recent = (d.recent || []).slice(0, 8);
+    box.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat"><div class="num">${escapeHtml(d.requests || 0)}</div><div class="label">请求数</div></div>
+        <div class="stat"><div class="num">${escapeHtml(d.requested_images || 0)}</div><div class="label">请求图片</div></div>
+        <div class="stat"><div class="num">${escapeHtml(d.successful_images || 0)}</div><div class="label">成功图片</div></div>
+        <div class="stat"><div class="num">${escapeHtml(d.failed_images || 0)}</div><div class="label">失败/缺失</div></div>
+      </div>
+      <div class="tip"><strong>Top 用户：</strong> ${users.length ? users.map(u=>`${escapeHtml(u.name || u.id)}（${escapeHtml(u.requested_images || 0)}张）`).join('，') : '暂无数据'}<br>统计从 ${escapeHtml(fmtCreated(d.started_at))} 开始，服务重启会清零。</div>
+      <div class="recent-list">${recent.length ? recent.map(e=>`<div class="recent-item"><span>${escapeHtml(fmtCreated(e.time))} · ${escapeHtml(e.user_name || e.user_id)} · ${escapeHtml(e.endpoint)} · ${escapeHtml(e.mode)} · ${escapeHtml(e.successful_images)}/${escapeHtml(e.requested_images)} 张${e.error ? ` · ${escapeHtml(e.error)}` : ''}</span><span class="muted">${escapeHtml(e.elapsed_ms || 0)}ms</span></div>`).join('') : '<div class="empty" style="padding:10px">暂无请求记录</div>'}</div>
+    `;
+  }catch(e){
+    box.innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
 // 鉴权 + 启动
 (async()=>{
   const ident = await ensureAuth(true);
@@ -582,6 +681,7 @@ async function toggleUser(id, enabled){
   await loadModeSettings();
   await loadRelaySettings();
   await loadAccounts();
+  await loadUsage();
   await loadUsers();
 })();
 </script>
