@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except AttributeError:
+    pass
 
 MODE = os.getenv("MODE", "relay").lower()
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "180"))
@@ -46,7 +53,7 @@ RELAY_KEY = os.getenv("IMAGE_API_KEY", "")
 CHAT_BASE = os.getenv("CHAT_API_BASE", "http://127.0.0.1:3000/v1").rstrip("/")
 CHAT_KEY = os.getenv("CHAT_API_KEY", "")
 RELAY_ONLY_MODELS = {"gpt-image-2"}
-DEFAULT_ACCOUNT_POOL_MODELS = ("gpt-4o-image", "gpt-4o")
+DEFAULT_ACCOUNT_POOL_MODELS = ("gpt-image-2", "gpt-4o-image", "gpt-4o")
 PROXY = os.getenv("HTTP_PROXY") or os.getenv("PROXY") or None
 
 # chatgpt2api account-management proxy (browser hits image-gen-demo, server forwards with hidden key)
@@ -131,17 +138,36 @@ def _extract_bearer(auth_header: str | None) -> str:
     return ""
 
 
+def _quota_fields(u: dict) -> dict:
+    raw_allowed = u.get("allowed_count")
+    try:
+        allowed = None if raw_allowed is None else max(0, int(raw_allowed))
+    except (TypeError, ValueError):
+        allowed = None
+    try:
+        used = max(0, int(u.get("used_count") or 0))
+    except (TypeError, ValueError):
+        used = 0
+    remaining = None if allowed is None else max(allowed - used, 0)
+    return {"allowed_count": allowed, "used_count": used, "remaining_count": remaining}
+
+
+def _quota_exceeded(fields: dict, requested: int) -> bool:
+    remaining = fields.get("remaining_count")
+    return remaining is not None and remaining < max(1, int(requested or 1))
+
+
 def _identity_for(token: str) -> dict | None:
     if not token:
         return None
     data = _load_auth()
     if token == data.get("admin_token"):
-        return {"role": "admin", "name": "管理员", "id": "admin"}
+        return {"role": "admin", "name": "管理员", "id": "admin", "allowed_count": None, "used_count": None, "remaining_count": None}
     for u in data.get("users", []):
         if u.get("key") == token and u.get("enabled", True):
             u["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             _save_auth(data)
-            return {"role": "user", "name": u.get("name", ""), "id": u.get("id", "")}
+            return {"role": "user", "name": u.get("name", ""), "id": u.get("id", ""), **_quota_fields(u)}
     return None
 
 
@@ -157,6 +183,49 @@ def require_admin(authorization: str | None = Header(default=None)):
     if ident["role"] != "admin":
         raise HTTPException(403, "admin only")
     return ident
+
+
+def _check_user_quota(ident: dict, requested: int) -> None:
+    if ident.get("role") == "admin":
+        return
+    data = _load_auth()
+    for u in data.get("users", []):
+        if u.get("id") == ident.get("id"):
+            fields = _quota_fields(u)
+            if _quota_exceeded(fields, requested):
+                raise HTTPException(
+                    status_code=429,
+                    detail={"error": "密钥可用生图次数不足", **fields},
+                )
+            return
+    raise HTTPException(401, "auth required")
+
+
+def _count_success_images(result, fallback: int) -> int:
+    if isinstance(result, JSONResponse) and result.status_code >= 400:
+        return 0
+    content = result.body if isinstance(result, JSONResponse) else result
+    if isinstance(content, (bytes, bytearray)):
+        try:
+            content = json.loads(content.decode("utf-8"))
+        except Exception:
+            content = None
+    if isinstance(content, dict) and isinstance(content.get("data"), list):
+        count = sum(1 for item in content["data"] if isinstance(item, dict) and (item.get("b64_json") or item.get("url")) and not item.get("error"))
+        return count if count > 0 else 0
+    return max(0, int(fallback or 0))
+
+
+def _consume_user_quota(ident: dict, count: int) -> None:
+    if ident.get("role") == "admin" or count <= 0:
+        return
+    data = _load_auth()
+    for u in data.get("users", []):
+        if u.get("id") == ident.get("id"):
+            fields = _quota_fields(u)
+            u["used_count"] = fields["used_count"] + count
+            _save_auth(data)
+            return
 
 
 def _enforce_user_rate_limit(ident: dict, units: int = 1) -> None:
@@ -284,6 +353,7 @@ class GenerateRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     quality: Optional[str] = None
     model: Optional[str] = Field(default=None, max_length=120)
+    source: Optional[Literal["auto", "relay", "chat2api", "account_pool"]] = None
 
 
 class RelaySettingsBody(BaseModel):
@@ -316,9 +386,13 @@ def _account_pool_models() -> list[str]:
     configured = [m.strip() for m in os.getenv("ACCOUNT_POOL_MODELS", "").split(",") if m.strip()]
     models: list[str] = []
     for model in [*configured, *DEFAULT_ACCOUNT_POOL_MODELS, MODEL]:
-        if model and model not in RELAY_ONLY_MODELS and model not in models:
+        if model and model not in models:
             models.append(model)
     return models
+
+
+def _option_id(source: str, model: str) -> str:
+    return f"{source}:{model}"
 
 
 def _model_options() -> list[dict]:
@@ -327,21 +401,28 @@ def _model_options() -> list[dict]:
     account_ready = bool(CHAT_KEY)
     options = [
         {
-            "id": "gpt-image-2",
+            "id": _option_id("relay", "gpt-image-2"),
+            "model": "gpt-image-2",
             "label": "GPT Image 2（中转站，支持参考图）",
             "source": "relay",
             "ready": relay_ready,
             "supports_edits": True,
         }
     ]
+    seen_ids = {options[0]["id"]}
     for model in _account_pool_models():
+        option_id = _option_id("chat2api", model)
+        if option_id in seen_ids:
+            continue
+        seen_ids.add(option_id)
         options.append(
             {
-                "id": model,
+                "id": option_id,
+                "model": model,
                 "label": f"{model}（账号池）",
                 "source": "chat2api",
                 "ready": account_ready,
-                "supports_edits": False,
+                "supports_edits": account_ready,
             }
         )
     return options
@@ -351,18 +432,49 @@ def _default_model() -> str:
     mode = _current_mode()
     if mode == "chat2api":
         models = _account_pool_models()
-        return models[0] if models else MODEL
-    return "gpt-image-2"
+        preferred = next((model for model in models if model not in RELAY_ONLY_MODELS), models[0] if models else MODEL)
+        return _option_id("chat2api", preferred)
+    return _option_id("relay", "gpt-image-2")
 
 
-def _allowed_models() -> set[str]:
-    return {item["id"] for item in _model_options()}
+def _normalize_source(value: str | None) -> Literal["auto", "relay", "chat2api"]:
+    source = (value or "auto").strip().lower()
+    if source == "account_pool":
+        return "chat2api"
+    if source in {"relay", "chat2api"}:
+        return source  # type: ignore[return-value]
+    return "auto"
+
+
+def _split_model_choice(value: str | None) -> tuple[Literal["auto", "relay", "chat2api"], str]:
+    model = (value or "").strip()
+    if ":" not in model:
+        return "auto", model
+    source, raw_model = model.split(":", 1)
+    return _normalize_source(source), raw_model.strip()
+
+
+def _resolve_model_choice(model_value: str | None, source_value: str | None = None) -> tuple[str, Literal["relay", "chat2api"]]:
+    option_source, model = _split_model_choice(model_value)
+    source = _normalize_source(source_value)
+    if source == "auto":
+        source = option_source
+    if not model:
+        default_source, default_model = _split_model_choice(_default_model())
+        model = default_model
+        if source == "auto":
+            source = default_source
+    if source == "auto":
+        source = "relay" if model in RELAY_ONLY_MODELS else "chat2api"
+
+    allowed = {(item.get("source"), item.get("model")) for item in _model_options()}
+    if (source, model) not in allowed:
+        raise HTTPException(400, f"不支持的模型：{model}")
+    return model, source
 
 
 def _normalize_model(value: str | None) -> str:
-    model = (value or "").strip() or _default_model()
-    if model not in _allowed_models():
-        raise HTTPException(400, f"不支持的模型：{model}")
+    model, _ = _resolve_model_choice(value)
     return model
 
 
@@ -453,7 +565,13 @@ def _safe_json(r: httpx.Response):
     try:
         return r.json()
     except Exception:
-        return {"raw": r.text[:1000]}
+        raw = (r.text or "").strip()
+        if raw:
+            return {"message": raw[:1000]}
+        return {
+            "message": f"上游返回 HTTP {r.status_code}，但响应内容为空。请查看上游服务日志。",
+            "empty_response": True,
+        }
 
 
 def extract_image_urls(markdown: str) -> list:
@@ -544,8 +662,6 @@ def _upstream_error_status(status_code: int) -> int:
 
 
 async def generate_via_relay(req: GenerateRequest, model: str):
-    if _source_for_model(model) != "relay":
-        raise HTTPException(400, f"模型 {model} 需要账号池，请选择账号池模型生成")
     cfg = _require_relay_config()
 
     payload: dict = {"model": model, "prompt": req.prompt, "size": req.size, "n": req.n}
@@ -570,8 +686,6 @@ async def generate_via_relay(req: GenerateRequest, model: str):
 # ---------- chat2api mode (new, for free ChatGPT account via reverse proxy) ----------
 
 async def generate_via_chat2api(req: GenerateRequest, model: str):
-    if _source_for_model(model) != "chat2api":
-        raise HTTPException(400, f"模型 {model} 需要中转站，请选择 gpt-image-2")
     if not CHAT_KEY:
         raise HTTPException(500, "账号池生图 key 未配置，请联系管理员")
 
@@ -599,8 +713,8 @@ async def generate_via_chat2api(req: GenerateRequest, model: str):
 @app.post("/api/generate")
 async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
     _enforce_user_rate_limit(ident, req.n)
-    model = _normalize_model(req.model)
-    mode = _source_for_model(model)
+    _check_user_quota(ident, req.n)
+    model, mode = _resolve_model_choice(req.model, req.source)
     started = time.perf_counter()
     status_code = 200
     result = None
@@ -611,6 +725,8 @@ async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
             else:
                 result = await generate_via_relay(req, model)
         status_code = result.status_code if isinstance(result, JSONResponse) else 200
+        if status_code < 400:
+            _consume_user_quota(ident, _count_success_images(result, req.n))
         return result
     except HTTPException as e:
         status_code = e.status_code
@@ -635,6 +751,61 @@ async def _read_edit_image(image: UploadFile) -> bytes:
     return content
 
 
+async def _post_edit_request(url: str, headers: dict, data: dict, files: dict, stage: str, *, trust_env: bool = True):
+    async with httpx.AsyncClient(timeout=TIMEOUT, trust_env=trust_env) as client:
+        try:
+            r = await client.post(url, headers=headers, data=data, files=files)
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"Upstream connection error: {e}")
+    if r.status_code >= 400:
+        return JSONResponse(
+            status_code=_upstream_error_status(r.status_code),
+            content={"error": _safe_json(r), "upstream_status": r.status_code, "stage": stage},
+        )
+    return r.json()
+
+
+async def edit_via_relay(
+    *,
+    prompt: str,
+    content: bytes,
+    filename: str,
+    content_type: str,
+    size: str,
+    n: int,
+    quality: str | None,
+    model: str,
+):
+    cfg = _require_relay_config()
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+    files = {"image": (filename, content, content_type)}
+    data = {"model": model, "prompt": prompt, "size": size, "n": str(n)}
+    if quality:
+        data["quality"] = quality
+    return await _post_edit_request(f"{cfg['base_url']}/edits", headers, data, files, "relay_image_edit")
+
+
+async def edit_via_chat2api(
+    *,
+    prompt: str,
+    content: bytes,
+    filename: str,
+    content_type: str,
+    size: str,
+    n: int,
+    quality: str | None,
+    model: str,
+):
+    if not CHAT_KEY:
+        raise HTTPException(500, "账号池生图 key 未配置，请联系管理员")
+    headers = {"Authorization": f"Bearer {CHAT_KEY}"}
+    files = {"image": (filename, content, content_type)}
+    data = {"model": model, "prompt": prompt, "size": size, "n": str(n), "response_format": "b64_json"}
+    if quality:
+        data["quality"] = quality
+    return await _post_edit_request(f"{CHAT_BASE}/images/edits", headers, data, files, "chat2api_image_edit", trust_env=False)
+
+
 @app.post("/api/edits")
 async def edits(
     prompt: Annotated[str, Form()],
@@ -643,42 +814,42 @@ async def edits(
     n: Annotated[int, Form()] = 1,
     quality: Annotated[str | None, Form()] = None,
     model: Annotated[str | None, Form()] = None,
+    source: Annotated[str | None, Form()] = None,
     ident: dict = Depends(require_user),
 ):
-    selected_model = _normalize_model(model)
-    if _source_for_model(selected_model) != "relay":
-        raise HTTPException(400, "参考图仅支持 gpt-image-2 / 中转站")
+    selected_model, selected_source = _resolve_model_choice(model, source)
 
     if n < 1 or n > 4:
         raise HTTPException(400, "n must be between 1 and 4")
 
     _enforce_user_rate_limit(ident, n)
-    mode = _source_for_model(selected_model)
+    _check_user_quota(ident, n)
+    mode = selected_source
     started = time.perf_counter()
     status_code = 200
     result = None
-    cfg = _require_relay_config()
-    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
     content = await _read_edit_image(image)
-    files = {"image": (image.filename or "ref.png", content, image.content_type or "image/png")}
-    data = {"model": selected_model, "prompt": prompt, "size": size, "n": str(n)}
-    if quality:
-        data["quality"] = quality
+    filename = image.filename or "ref.png"
+    content_type = image.content_type or "image/png"
     try:
         async with _image_semaphore:
-            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-                try:
-                    r = await client.post(f"{cfg['base_url']}/edits", headers=headers, data=data, files=files)
-                except httpx.HTTPError as e:
-                    raise HTTPException(502, f"Upstream connection error: {e}")
-        if r.status_code >= 400:
-            result = JSONResponse(
-                status_code=_upstream_error_status(r.status_code),
-                content={"error": _safe_json(r), "upstream_status": r.status_code},
-            )
-            status_code = result.status_code
-            return result
-        result = r.json()
+            kwargs = {
+                "prompt": prompt,
+                "content": content,
+                "filename": filename,
+                "content_type": content_type,
+                "size": size,
+                "n": n,
+                "quality": quality,
+                "model": selected_model,
+            }
+            if selected_source == "chat2api":
+                result = await edit_via_chat2api(**kwargs)
+            else:
+                result = await edit_via_relay(**kwargs)
+        status_code = result.status_code if isinstance(result, JSONResponse) else 200
+        if status_code < 400:
+            _consume_user_quota(ident, _count_success_images(result, n))
         return result
     except HTTPException as e:
         status_code = e.status_code
@@ -982,11 +1153,14 @@ async def refresh_accounts(body: TokenListBody, _: dict = Depends(require_admin)
 class UserCreateBody(BaseModel):
     name: str = Field(default="", max_length=80)
     key: str = Field(default="", max_length=200)
+    allowed_count: Optional[int] = Field(default=None, ge=0)
 
 
 class UserPatchBody(BaseModel):
     name: Optional[str] = None
     enabled: Optional[bool] = None
+    allowed_count: Optional[int] = Field(default=None, ge=0)
+    quota_unlimited: bool = False
 
 
 def _public_user(u: dict) -> dict:
@@ -997,6 +1171,7 @@ def _public_user(u: dict) -> dict:
         "enabled": u.get("enabled", True),
         "created": u.get("created", ""),
         "last_used": u.get("last_used", None),
+        **_quota_fields(u),
     }
 
 
@@ -1024,6 +1199,8 @@ async def create_user(body: UserCreateBody, _: dict = Depends(require_admin)):
         "enabled": True,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "last_used": None,
+        "allowed_count": body.allowed_count,
+        "used_count": 0,
     }
     data.setdefault("users", []).append(user)
     _save_auth(data)
@@ -1039,6 +1216,11 @@ async def patch_user(user_id: str, body: UserPatchBody, _: dict = Depends(requir
                 u["name"] = body.name.strip()[:80]
             if body.enabled is not None:
                 u["enabled"] = bool(body.enabled)
+            if body.quota_unlimited:
+                u["allowed_count"] = None
+            elif body.allowed_count is not None:
+                u["allowed_count"] = body.allowed_count
+            u["used_count"] = _quota_fields(u)["used_count"]
             _save_auth(data)
             return _public_user(u)
     raise HTTPException(404, "user not found")

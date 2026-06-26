@@ -252,6 +252,7 @@ let activeController=null;
 let stopRequested=false;
 let healthLoaded=false;
 let modelOptions=[];
+let currentIdent=null;
 
 const $=id=>document.getElementById(id);
 const refUploadArea=$('refUploadArea');
@@ -260,10 +261,23 @@ const refPreviewImg=$('refPreviewImg');
 const refInfo=$('refInfo');
 const refFileInput=$('refFileInput');
 
+function renderUserBadge(ident){
+  currentIdent=ident;
+  const quota=ident.remaining_count===null||ident.remaining_count===undefined?'不限':`${ident.remaining_count} 张`;
+  $('userBadge').style.display='inline-block';
+  $('userBadge').textContent=`${ident.name}（${ident.role}） · 剩余：${quota}`;
+}
+
+async function refreshIdentity(){
+  try{
+    const ident=await checkAuth();
+    renderUserBadge(ident);
+  }catch(e){}
+}
+
 (async()=>{
   const ident=await ensureAuth(false);
-  $('userBadge').style.display='inline-block';
-  $('userBadge').textContent=`${ident.name}（${ident.role}）`;
+  renderUserBadge(ident);
   if(ident.role==='admin')$('adminLink').style.display='inline-block';
   loadHealth();
 })();
@@ -277,8 +291,18 @@ function selectedModelInfo(){
   return modelOptions.find(item=>item.id===model)||null;
 }
 
-function relayModelReady(){
-  return modelOptions.some(item=>item.id==='gpt-image-2'&&item.ready);
+function selectedGenerationChoice(){
+  const info=selectedModelInfo();
+  if(info)return {id:info.id,model:info.model||info.id,source:info.source||'auto'};
+  const raw=selectedModel();
+  const idx=raw.indexOf(':');
+  if(idx>=0)return {id:raw,source:raw.slice(0,idx),model:raw.slice(idx+1)};
+  return {id:raw,model:raw,source:'auto'};
+}
+
+function selectedSupportsEdits(){
+  const info=selectedModelInfo();
+  return !!(info?.supports_edits&&info.ready);
 }
 
 function populateModelSelect(models,defaultModel){
@@ -297,22 +321,13 @@ function populateModelSelect(models,defaultModel){
   }).join('');
   const preferred=modelOptions.find(item=>item.id===defaultModel&&item.ready)||modelOptions.find(item=>item.ready)||modelOptions[0];
   select.value=preferred.id;
-  setRefUploadEnabled(!!selectedModelInfo()?.supports_edits&&!!selectedModelInfo()?.ready);
+  setRefUploadEnabled(selectedSupportsEdits());
 }
 
 function enforceReferenceModel({silent=false}={}){
   if(!refImageFile)return true;
-  const info=selectedModelInfo();
-  if(info?.supports_edits&&info.ready)return true;
-  const select=$('modelSelect');
-  const relay=modelOptions.find(item=>item.id==='gpt-image-2'&&item.ready);
-  if(relay){
-    select.value='gpt-image-2';
-    setRefUploadEnabled(true);
-    if(!silent)showStatus('参考图仅支持 gpt-image-2，已自动切换到中转站','warn');
-    return true;
-  }
-  if(!silent)showStatus('参考图需要 gpt-image-2 / 中转站，但当前中转站未配置','danger');
+  if(selectedSupportsEdits())return true;
+  if(!silent)showStatus('当前模型不支持参考图，请选择支持参考图的模型或移除参考图','danger');
   return false;
 }
 
@@ -330,13 +345,13 @@ async function loadHealth(){
       setRefUploadEnabled(false);
       return;
     }
-    editsSupported=relayModelReady();
-    const readyModels=modelOptions.filter(item=>item.ready).map(item=>item.id).join(' / ');
-    const editsHint=editsSupported?'参考图会自动使用 gpt-image-2 / 中转站':'<br>参考图需要 gpt-image-2 / 中转站，请联系管理员配置';
+    editsSupported=modelOptions.some(item=>item.ready&&item.supports_edits);
+    const readyModels=modelOptions.filter(item=>item.ready).map(item=>item.label||item.id).join(' / ');
+    const editsHint=editsSupported?'参考图支持取决于当前选择的模型 / 来源':'<br>暂无支持参考图的可用模型，请联系管理员配置';
     el.className='config-info';
-    el.innerHTML=`后端代理已就绪<br>按模型智能路由：<code>gpt-image-2</code> 走中转站，其他模型走账号池<br>可用模型：<code>${escapeHtml(readyModels||'无')}</code><br>${editsHint}`;
+    el.innerHTML=`后端代理已就绪<br>用户可按模型 / 来源选择中转站或账号池<br>可用选项：<code>${escapeHtml(readyModels||'无')}</code><br>${editsHint}`;
     healthLoaded=true;
-    setRefUploadEnabled(!!selectedModelInfo()?.supports_edits&&!!selectedModelInfo()?.ready);
+    setRefUploadEnabled(selectedSupportsEdits());
   }catch(e){
     editsSupported=false;
     healthLoaded=true;
@@ -354,16 +369,9 @@ function setRefUploadEnabled(enabled){
 
 function openRefPicker(e){
   if(e)e.stopPropagation();
-  const info=selectedModelInfo();
-  if(healthLoaded&&(!info?.supports_edits||!info?.ready)){
-    if(relayModelReady()){
-      $('modelSelect').value='gpt-image-2';
-      setRefUploadEnabled(true);
-      showStatus('参考图仅支持 gpt-image-2，已自动切换到中转站','warn');
-    }else{
-      showStatus('参考图需要 gpt-image-2 / 中转站，请联系管理员配置','danger');
-      return;
-    }
+  if(healthLoaded&&!selectedSupportsEdits()){
+    showStatus('当前模型不支持参考图，请选择支持参考图的模型','danger');
+    return;
   }
   refFileInput.value='';
   refFileInput.click();
@@ -488,7 +496,7 @@ function makeTasks(){
   const style=$('style').value;
   const size=$('size').value;
   const quality=$('quality').value;
-  const model=selectedModel();
+  const choice=selectedGenerationChoice();
   return prompts.map((prompt,index)=>({
     id:`task-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
     prompt,
@@ -496,7 +504,9 @@ function makeTasks(){
     style,
     size,
     quality,
-    model,
+    model:choice.model,
+    source:choice.source,
+    optionId:choice.id,
     count,
     promptIndex:index,
     refFile:refImageFile,
@@ -518,10 +528,11 @@ function buildImageRequest(task){
     formData.append('n',String(task.count));
     if(task.quality)formData.append('quality',task.quality);
     if(task.model)formData.append('model',task.model);
+    if(task.source)formData.append('source',task.source);
     formData.append('image',task.refFile,task.refFile.name||'reference-image');
     return {url:EDITS_API_URL,options:{method:'POST',body:formData}};
   }
-  const body={prompt:task.fullPrompt,size:task.size,n:task.count,model:task.model};
+  const body={prompt:task.fullPrompt,size:task.size,n:task.count,model:task.model,source:task.source};
   if(task.quality)body.quality=task.quality;
   return {
     url:GENERATIONS_API_URL,
@@ -562,7 +573,7 @@ async function generate(){
     count:parseInt($('count').value,10)||1,
     style:$('style').value,
     quality:$('quality').value,
-    model:selectedModel(),
+    model:selectedGenerationChoice().id,
     hasRef:!!refImageFile
   };
   $('imagesGrid').innerHTML='';
@@ -642,6 +653,7 @@ async function runTasks(tasks,{append=false}={}){
   }finally{
     setBusy(false);
     stopRequested=false;
+    await refreshIdentity();
     updateOutputActions();
     renderRunMeta(tasks,expected);
   }
@@ -670,6 +682,7 @@ function renderRunMeta(tasks,expected){
 }
 
 function readErrorDetail(data,status){
+  if(data?.detail?.error)return data.detail.error;
   return data?.error?.error?.message||data?.error?.message||data?.detail||JSON.stringify(data?.error||data)||`HTTP ${status}`;
 }
 

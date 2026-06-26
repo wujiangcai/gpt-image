@@ -104,13 +104,20 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         data = r.json()
         self.assertEqual(data["routing"], "model")
+        ids = [item["id"] for item in data["models"]]
+        self.assertEqual(len(ids), len(set(ids)))
         models = {item["id"]: item for item in data["models"]}
-        self.assertIn("gpt-image-2", models)
-        self.assertEqual(models["gpt-image-2"]["source"], "relay")
-        self.assertTrue(models["gpt-image-2"]["supports_edits"])
-        self.assertIn("gpt-4o-image", models)
-        self.assertEqual(models["gpt-4o-image"]["source"], "chat2api")
-        self.assertFalse(models["gpt-4o-image"]["supports_edits"])
+        self.assertIn("relay:gpt-image-2", models)
+        self.assertEqual(models["relay:gpt-image-2"]["model"], "gpt-image-2")
+        self.assertEqual(models["relay:gpt-image-2"]["source"], "relay")
+        self.assertTrue(models["relay:gpt-image-2"]["supports_edits"])
+        self.assertIn("chat2api:gpt-image-2", models)
+        self.assertEqual(models["chat2api:gpt-image-2"]["model"], "gpt-image-2")
+        self.assertEqual(models["chat2api:gpt-image-2"]["source"], "chat2api")
+        self.assertTrue(models["chat2api:gpt-image-2"]["supports_edits"])
+        self.assertIn("chat2api:gpt-4o-image", models)
+        self.assertEqual(models["chat2api:gpt-4o-image"]["source"], "chat2api")
+        self.assertTrue(models["chat2api:gpt-4o-image"]["supports_edits"])
 
     def test_generate_routes_by_selected_model(self):
         calls = []
@@ -126,7 +133,25 @@ class AdminFeatureTests(unittest.TestCase):
         with patch.object(self.main, "generate_via_relay", fake_relay), patch.object(self.main, "generate_via_chat2api", fake_chat2api):
             r = self.client.post(
                 "/api/generate",
-                json={"prompt": "relay image", "model": "gpt-image-2"},
+                json={"prompt": "legacy relay image", "model": "gpt-image-2"},
+                headers=self.headers,
+            )
+            self.assertEqual(r.status_code, 200)
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "explicit pool image", "model": "gpt-image-2", "source": "chat2api"},
+                headers=self.headers,
+            )
+            self.assertEqual(r.status_code, 200)
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "option id pool image", "model": "chat2api:gpt-image-2"},
+                headers=self.headers,
+            )
+            self.assertEqual(r.status_code, 200)
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "explicit relay image", "model": "gpt-image-2", "source": "relay"},
                 headers=self.headers,
             )
             self.assertEqual(r.status_code, 200)
@@ -137,7 +162,16 @@ class AdminFeatureTests(unittest.TestCase):
             )
             self.assertEqual(r.status_code, 200)
 
-        self.assertEqual(calls, [("relay", "gpt-image-2", "relay image"), ("chat2api", "gpt-4o-image", "pool image")])
+        self.assertEqual(
+            calls,
+            [
+                ("relay", "gpt-image-2", "legacy relay image"),
+                ("chat2api", "gpt-image-2", "explicit pool image"),
+                ("chat2api", "gpt-image-2", "option id pool image"),
+                ("relay", "gpt-image-2", "explicit relay image"),
+                ("chat2api", "gpt-4o-image", "pool image"),
+            ],
+        )
 
     def test_generate_rejects_unknown_model(self):
         r = self.client.post(
@@ -148,15 +182,98 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertIn("不支持的模型", r.json()["detail"])
 
-    def test_edits_rejects_account_pool_model(self):
+    def test_edits_forward_to_chat2api_for_account_pool_source(self):
+        posts = []
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"edited"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "edited"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                posts.append({"url": url, "headers": headers, "data": data, "files": files})
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/edits",
+                data={"prompt": "edit this", "size": "1024x1024", "n": "1", "model": "gpt-image-2", "source": "chat2api"},
+                files={"image": ("ref.png", b"png-bytes", "image/png")},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["data"][0]["b64_json"], "edited")
+        self.assertEqual(posts[0]["url"], f"{self.main.CHAT_BASE}/images/edits")
+        self.assertEqual(posts[0]["headers"]["Authorization"], f"Bearer {self.main.CHAT_KEY}")
+        self.assertEqual(posts[0]["data"]["model"], "gpt-image-2")
+        self.assertEqual(posts[0]["data"]["prompt"], "edit this")
+        self.assertEqual(posts[0]["data"]["size"], "1024x1024")
+        self.assertEqual(posts[0]["data"]["n"], "1")
+        self.assertEqual(posts[0]["data"]["response_format"], "b64_json")
+        self.assertIn("image", posts[0]["files"])
+        self.assertEqual(posts[0]["files"]["image"][0], "ref.png")
+
+    def test_edits_forward_to_relay_source(self):
+        posts = []
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"relay-edited"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "relay-edited"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                posts.append({"url": url, "headers": headers, "data": data, "files": files})
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/edits",
+                data={"prompt": "edit relay", "size": "1024x1024", "n": "1", "model": "gpt-image-2", "source": "relay"},
+                files={"image": ("ref.png", b"png-bytes", "image/png")},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(posts[0]["url"], "https://relay.example/v1/images/edits")
+        self.assertEqual(posts[0]["headers"]["Authorization"], "Bearer relay-key")
+        self.assertEqual(posts[0]["data"]["model"], "gpt-image-2")
+        self.assertNotIn("response_format", posts[0]["data"])
+
+    def test_edits_chat2api_requires_chat_key(self):
+        self.main.CHAT_KEY = ""
         r = self.client.post(
             "/api/edits",
-            data={"prompt": "edit this", "size": "1024x1024", "n": "1", "model": "gpt-4o-image"},
+            data={"prompt": "edit this", "size": "1024x1024", "n": "1", "model": "gpt-image-2", "source": "chat2api"},
             files={"image": ("ref.png", b"png-bytes", "image/png")},
             headers=self.headers,
         )
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("参考图仅支持", r.json()["detail"])
+        self.assertEqual(r.status_code, 500)
+        self.assertIn("账号池生图 key", r.json()["detail"])
 
     def test_delete_accounts_falls_back_and_masks_tokens(self):
         calls = []
