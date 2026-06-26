@@ -540,21 +540,36 @@ async function loadUsers(){
         <td><strong>${escapeHtml(u.name||'-')}</strong></td>
         <td><div style="display:flex;gap:6px;align-items:center">
           <code style="font-family:'SF Mono',Consolas,monospace;font-size:.72rem;color:var(--accent2);background:var(--surface2);padding:3px 8px;border-radius:5px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(u.key)}</code>
-          <button class="btn btn-secondary" onclick="copyText(${jsString(u.key)})" style="padding:4px 8px;font-size:.7rem">复制</button>
+          <button class="btn btn-secondary user-copy-btn" data-key="${escapeHtml(u.key)}" style="padding:4px 8px;font-size:.7rem">复制</button>
         </div></td>
         <td><span class="muted">${escapeHtml(userQuotaText(u))}</span></td>
         <td>${enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">禁用</span>'}</td>
         <td><span class="muted">${escapeHtml(fmtCreated(u.created))}</span></td>
         <td><span class="muted">${escapeHtml(fmtCreated(u.last_used))}</span></td>
         <td><div class="actions">
-          <button class="btn btn-secondary" onclick="setUserQuota(${jsString(u.id)},${u.allowed_count === null || u.allowed_count === undefined ? 'null' : Number(u.allowed_count)})" style="padding:5px 10px;font-size:.72rem">改额度</button>
-          <button class="btn btn-secondary" onclick="toggleUser(${jsString(u.id)},${!enabled})" style="padding:5px 10px;font-size:.72rem">${enabled?'禁用':'启用'}</button>
-          <button class="btn btn-danger" onclick="deleteUser(${jsString(u.id)},${jsString(u.name||'')})">删除</button>
+          <button class="btn btn-secondary user-quota-btn" data-user-id="${escapeHtml(u.id)}" data-allowed-count="${u.allowed_count === null || u.allowed_count === undefined ? '' : escapeHtml(u.allowed_count)}" style="padding:5px 10px;font-size:.72rem">改额度</button>
+          <button class="btn btn-secondary user-toggle-btn" data-user-id="${escapeHtml(u.id)}" data-enabled="${!enabled}" style="padding:5px 10px;font-size:.72rem">${enabled?'禁用':'启用'}</button>
+          <button class="btn btn-danger user-delete-btn" data-user-id="${escapeHtml(u.id)}" data-user-name="${escapeHtml(u.name||'')}">删除</button>
         </div></td>
       </tr>`;
     }
     html+='</tbody></table></div>';
     $('usersBox').innerHTML = html;
+    document.querySelectorAll('.user-copy-btn').forEach(btn => {
+      btn.addEventListener('click', () => copyText(btn.dataset.key || ''));
+    });
+    document.querySelectorAll('.user-quota-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const raw = btn.dataset.allowedCount || '';
+        setUserQuota(btn.dataset.userId || '', raw === '' ? null : Number(raw));
+      });
+    });
+    document.querySelectorAll('.user-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => toggleUser(btn.dataset.userId || '', btn.dataset.enabled === 'true'));
+    });
+    document.querySelectorAll('.user-delete-btn').forEach(btn => {
+      btn.addEventListener('click', () => deleteUser(btn.dataset.userId || '', btn.dataset.userName || ''));
+    });
   }catch(e){
     $('usersBox').innerHTML = `<div class="empty" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</div>`;
   }
