@@ -29,6 +29,10 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
 .btn-primary{background:var(--accent);border-color:var(--accent);color:#06130f}
 .btn-primary:hover{background:var(--accent2);border-color:var(--accent2)}
 .btn-primary:disabled,.btn-secondary:disabled{opacity:.55;cursor:not-allowed}
+.btn-primary.is-stop{background:var(--danger);border-color:var(--danger);color:#fff;animation:stopPulse 1.4s ease-in-out infinite}
+.btn-primary.is-stop:hover{background:#ff5572;border-color:#ff5572}
+.btn-primary.is-stop:disabled{opacity:.6;animation:none}
+@keyframes stopPulse{0%,100%{box-shadow:0 0 0 0 rgba(251,113,133,.55)}50%{box-shadow:0 0 0 8px rgba(251,113,133,0)}}
 .btn-secondary{background:var(--surface2);color:var(--text);border-color:var(--border)}
 .btn-secondary:hover{border-color:var(--accent);color:var(--accent2)}
 .btn-danger{background:rgba(251,113,133,.12);color:var(--danger);border-color:rgba(251,113,133,.35)}
@@ -44,7 +48,7 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
 .run-meta{font-size:.78rem;color:var(--text2);display:flex;gap:8px;flex-wrap:wrap}
 .pill{border:1px solid var(--border);background:var(--surface2);border-radius:999px;padding:3px 8px}
 .images-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;align-items:start}
-.img-card,.error-card{border-radius:8px;overflow:hidden;background:var(--surface2);border:1px solid var(--border);animation:fadeIn .2s ease}
+.img-card,.error-card,.gen-placeholder{border-radius:8px;overflow:hidden;background:var(--surface2);border:1px solid var(--border);animation:fadeIn .2s ease}
 .img-card{position:relative}
 .img-card img{width:100%;aspect-ratio:1/1;object-fit:contain;background:#0b0e13;display:block}
 .img-card .actions{position:absolute;left:0;right:0;bottom:0;padding:10px;background:linear-gradient(transparent,rgba(0,0,0,.82));display:flex;gap:6px;opacity:0;transition:opacity .15s;flex-wrap:wrap}
@@ -70,6 +74,17 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
 .history-item .info span{font-size:.7rem;color:var(--text2)}
 .placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:70px 16px;color:var(--text2);gap:12px;text-align:center;grid-column:1/-1}
 .placeholder svg{width:56px;height:56px;opacity:.35}
+.gen-placeholder{position:relative;aspect-ratio:1/1;background:radial-gradient(circle at 50% 45%,#16202b 0%,#0b0e13 70%);display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;transition:opacity .25s ease}
+.gen-placeholder canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.gen-placeholder .gp-ring{position:absolute;top:50%;left:50%;width:54%;aspect-ratio:1/1;border:1px solid rgba(79,184,168,.25);border-top-color:var(--accent2);border-radius:50%;transform:translate(-50%,-50%);animation:gpRing 1.1s linear infinite}
+.gen-placeholder .gp-ring.r2{width:38%;border-top-color:transparent;border-right-color:rgba(110,231,211,.45);animation-duration:1.6s;animation-direction:reverse}
+@keyframes gpRing{to{transform:translate(-50%,-50%) rotate(360deg)}}
+.gen-placeholder .gp-core{position:relative;z-index:2;width:46px;height:46px;border-radius:50%;background:radial-gradient(circle,var(--accent2) 0%,rgba(79,184,168,.35) 45%,transparent 70%);animation:gpCore 1.6s ease-in-out infinite}
+@keyframes gpCore{0%,100%{transform:scale(.82);opacity:.7}50%{transform:scale(1.12);opacity:1}}
+.gen-placeholder .gp-label{position:absolute;left:0;right:0;bottom:0;padding:12px 12px 11px;background:linear-gradient(transparent,rgba(0,0,0,.82));font-size:.78rem;color:#dce5ea;text-align:center;z-index:3}
+.gen-placeholder .gp-label small{display:block;font-size:.68rem;color:var(--text2);margin-top:2px}
+.gen-placeholder.fading{opacity:0}
+@media(prefers-reduced-motion:reduce){.gen-placeholder .gp-ring,.gen-placeholder .gp-core{animation:none}.gen-placeholder canvas{display:none}}
 .config-info{font-size:.76rem;color:var(--text2);background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:9px 11px;line-height:1.55}
 .config-info code{color:var(--accent2);font-family:'SF Mono',Consolas,monospace;font-size:.72rem}
 .config-info.err{color:var(--danger);border-color:rgba(251,113,133,.35)}
@@ -80,13 +95,13 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
 .ref-upload-area p{font-size:.8rem;color:var(--text)}
 .ref-upload-area .hint{font-size:.72rem;color:var(--text2)}
 .ref-upload-area:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.ref-preview-wrap{position:relative;width:100%;border-radius:8px;overflow:hidden;border:1px solid var(--border);display:none}
-.ref-preview-wrap.active{display:block}
-.ref-preview-wrap img{width:100%;display:block;max-height:190px;object-fit:cover}
-.ref-preview-wrap .ref-remove,.ref-preview-wrap .ref-change{position:absolute;top:8px;border:1px solid rgba(255,255,255,.14);border-radius:5px;padding:4px 9px;font-size:.72rem;cursor:pointer;background:rgba(10,13,18,.82);color:#fff}
-.ref-preview-wrap .ref-remove{right:8px;color:var(--danger)}
-.ref-preview-wrap .ref-change{left:8px}
-.ref-preview-wrap .ref-info{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.82));padding:14px 10px 8px;font-size:.72rem;color:#fff}
+.ref-preview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:6px;margin-top:8px}
+.ref-preview-grid:empty{display:none}
+.ref-thumb{position:relative;border-radius:6px;overflow:hidden;border:1px solid var(--border);aspect-ratio:1/1;background:#0b0e13}
+.ref-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.ref-thumb-remove{position:absolute;top:3px;right:3px;width:20px;height:20px;border:none;border-radius:50%;background:rgba(10,13,18,.82);color:var(--danger);font-size:.85rem;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.ref-thumb-remove:hover{background:rgba(251,113,133,.55);color:#fff}
+.ref-thumb-info{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.82));padding:10px 5px 4px;font-size:.6rem;color:#fff;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #status{font-size:.84rem;color:var(--text2);text-align:center;min-height:20px;line-height:1.4}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 @media (hover:none){.img-card{display:flex;flex-direction:column}.img-card .actions{position:static;opacity:1;background:var(--surface3);padding:8px}.img-card .actions button{background:var(--surface2);color:var(--text);border-color:var(--border)}}
@@ -181,22 +196,20 @@ textarea{resize:vertical;min-height:150px;font-family:inherit;line-height:1.5}
   </div>
 
   <div>
-    <label>参考图</label>
+    <div class="field-head">
+      <label>参考图</label>
+      <span id="refStats" class="field-note">0/4</span>
+    </div>
     <div class="ref-upload-area" id="refUploadArea" role="button" tabindex="0" aria-controls="refFileInput" aria-label="上传参考图">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
       <p>添加参考图</p>
-      <p class="hint">PNG / JPG / WEBP，最大 10MB</p>
+      <p class="hint">PNG / JPG / WEBP，每张 ≤10MB，最多 4 张</p>
     </div>
-    <div class="ref-preview-wrap" id="refPreviewWrap">
-      <button type="button" class="ref-change" onclick="openRefPicker(event)">更换</button>
-      <img id="refPreviewImg" src="" alt="参考图">
-      <button type="button" class="ref-remove" onclick="removeRefImage(event)">移除</button>
-      <div class="ref-info" id="refInfo">参考图</div>
-    </div>
-    <input type="file" id="refFileInput" accept="image/png,image/jpeg,image/webp" style="display:none">
+    <div class="ref-preview-grid" id="refPreviewGrid"></div>
+    <input type="file" id="refFileInput" accept="image/png,image/jpeg,image/webp" multiple style="display:none">
   </div>
 
-  <button class="btn btn-primary" id="generateBtn" onclick="generate()"><span class="spinner" id="spinner"></span><span id="btnText">生成图片</span></button>
+  <button class="btn btn-primary" id="generateBtn" onclick="onGenerateClick()"><span class="spinner" id="spinner"></span><span id="btnText">生成图片</span></button>
   <div id="status"></div>
 
   <div class="history-head">
@@ -239,10 +252,10 @@ const EDITS_API_URL='/api/edits';
 const HEALTH_API_URL='/api/health';
 const STATUS_COLORS={info:'var(--text2)',success:'var(--success)',danger:'var(--danger)',warn:'var(--warn)'};
 const MAX_REF_FILE_SIZE=10*1024*1024;
+const MAX_REF_FILES=4;
 const REF_IMAGE_TYPES=new Set(['image/png','image/jpeg','image/webp']);
 let generating=false;
-let refImageBase64=null;
-let refImageFile=null;
+let refImageFiles=[];
 let editsSupported=false;
 let currentResults=[];
 let failedTasks=[];
@@ -256,9 +269,8 @@ let currentIdent=null;
 
 const $=id=>document.getElementById(id);
 const refUploadArea=$('refUploadArea');
-const refPreviewWrap=$('refPreviewWrap');
-const refPreviewImg=$('refPreviewImg');
-const refInfo=$('refInfo');
+const refPreviewGrid=$('refPreviewGrid');
+const refStats=$('refStats');
 const refFileInput=$('refFileInput');
 
 function renderUserBadge(ident){
@@ -325,9 +337,10 @@ function populateModelSelect(models,defaultModel){
 }
 
 function enforceReferenceModel({silent=false}={}){
-  if(!refImageFile)return true;
+  if(!refImageFiles.length)return true;
   if(selectedSupportsEdits())return true;
   if(!silent)showStatus('当前模型不支持参考图，请选择支持参考图的模型或移除参考图','danger');
+  clearRefImages();
   return false;
 }
 
@@ -365,12 +378,21 @@ async function loadHealth(){
 function setRefUploadEnabled(enabled){
   refUploadArea.classList.toggle('disabled',!enabled);
   refUploadArea.setAttribute('aria-disabled',enabled?'false':'true');
+  updateRefStats();
+}
+
+function updateRefStats(){
+  if(refStats)refStats.textContent=`${refImageFiles.length}/${MAX_REF_FILES}`;
 }
 
 function openRefPicker(e){
   if(e)e.stopPropagation();
-  if(healthLoaded&&!selectedSupportsEdits()){
+  if(!selectedSupportsEdits()){
     showStatus('当前模型不支持参考图，请选择支持参考图的模型','danger');
+    return;
+  }
+  if(refImageFiles.length>=MAX_REF_FILES){
+    showStatus(`参考图最多 ${MAX_REF_FILES} 张`,'warn');
     return;
   }
   refFileInput.value='';
@@ -385,8 +407,8 @@ refUploadArea.addEventListener('keydown',e=>{
   }
 });
 refFileInput.addEventListener('change',e=>{
-  const [file]=e.target.files||[];
-  if(file)handleRefFile(file);
+  const files=e.target.files;
+  if(files&&files.length)handleRefFiles(files);
 });
 refUploadArea.addEventListener('dragover',e=>{
   e.preventDefault();
@@ -397,53 +419,101 @@ refUploadArea.addEventListener('dragleave',()=>refUploadArea.classList.remove('d
 refUploadArea.addEventListener('drop',e=>{
   e.preventDefault();
   refUploadArea.classList.remove('dragover');
-  const file=e.dataTransfer?.files?.[0];
-  if(file)handleRefFile(file);
+  const files=e.dataTransfer?.files;
+  if(files&&files.length)handleRefFiles(files);
 });
 document.addEventListener('paste',e=>{
   const items=e.clipboardData?.items||[];
+  const collected=[];
   for(let i=0;i<items.length;i++){
     if(items[i].type.startsWith('image/')){
       const file=items[i].getAsFile();
-      if(file)handleRefFile(file);
-      break;
+      if(file)collected.push(file);
     }
   }
+  if(collected.length)handleRefFiles(collected);
 });
 
-function handleRefFile(file){
-  if(!file){showStatus('请选择图片文件','danger');return}
-  if(!REF_IMAGE_TYPES.has(file.type)){showStatus('参考图仅支持 PNG、JPG、WEBP','danger');return}
-  if(file.size===0){showStatus('图片文件为空，请重新选择','danger');return}
-  if(file.size>MAX_REF_FILE_SIZE){showStatus('参考图不能超过 10MB','danger');return}
-  const reader=new FileReader();
-  reader.onerror=()=>showStatus('读取参考图失败，请重试','danger');
-  reader.onload=e=>{
-    refImageFile=file;
-    refImageBase64=e.target.result;
-    if(!enforceReferenceModel()){
-      refImageFile=null;
-      refImageBase64=null;
-      return;
-    }
-    refPreviewImg.src=refImageBase64;
-    refPreviewWrap.classList.add('active');
-    refUploadArea.style.display='none';
-    refInfo.textContent=`参考图 · ${file.name} · ${(file.size/1024).toFixed(1)}KB`;
-    showStatus('参考图已添加','success');
-  };
-  reader.readAsDataURL(file);
+function refFileKey(file){
+  return `${file.name}|${file.size}|${file.lastModified}`;
 }
 
-function removeRefImage(e){
-  if(e)e.stopPropagation();
-  refImageFile=null;
-  refImageBase64=null;
-  refPreviewImg.src='';
-  refPreviewWrap.classList.remove('active');
-  refUploadArea.style.display='flex';
+function handleRefFiles(fileList){
+  const files=Array.from(fileList||[]);
+  if(!files.length){showStatus('请选择图片文件','danger');return}
+  if(!healthLoaded||!selectedSupportsEdits()){
+    showStatus('当前模型不支持参考图，请选择支持参考图的模型','danger');
+    return;
+  }
+  const existingKeys=new Set(refImageFiles.map(refFileKey));
+  const added=[];
+  let rejectedType=0,rejectedSize=0;
+  for(const file of files){
+    if(refImageFiles.length+added.length>=MAX_REF_FILES)break;
+    if(!REF_IMAGE_TYPES.has(file.type)){rejectedType++;continue}
+    if(file.size===0){rejectedType++;continue}
+    if(file.size>MAX_REF_FILE_SIZE){rejectedSize++;continue}
+    const key=refFileKey(file);
+    if(existingKeys.has(key))continue;
+    existingKeys.add(key);
+    file._objectURL=URL.createObjectURL(file);
+    added.push(file);
+  }
+  if(added.length){
+    refImageFiles.push(...added);
+    renderRefPreviews();
+    enforceReferenceModel();
+    const parts=[`已添加 ${added.length} 张参考图`];
+    if(rejectedType)parts.push(`${rejectedType} 张类型/空文件被忽略`);
+    if(rejectedSize)parts.push(`${rejectedSize} 张超过 10MB 被忽略`);
+    if(refImageFiles.length+added.length>=MAX_REF_FILES&&files.length>added.length)parts.push('已达上限');
+    showStatus(parts.join('，'),added.length?'success':'warn');
+  }else if(rejectedType||rejectedSize){
+    showStatus(`${rejectedType?`${rejectedType} 张类型/空文件`:''}${rejectedSize?`${rejectedSize?'、':''}${rejectedSize} 张超过 10MB`:''}被忽略`,'warn');
+  }
   refFileInput.value='';
+}
+
+function renderRefPreviews(){
+  refPreviewGrid.innerHTML='';
+  refImageFiles.forEach((file,index)=>{
+    const thumb=document.createElement('div');
+    thumb.className='ref-thumb';
+    const img=document.createElement('img');
+    img.src=file._objectURL||'';
+    img.alt='参考图 '+(index+1);
+    thumb.appendChild(img);
+    const info=document.createElement('div');
+    info.className='ref-thumb-info';
+    info.textContent=`${index+1} · ${(file.size/1024).toFixed(0)}KB`;
+    thumb.appendChild(info);
+    const rm=document.createElement('button');
+    rm.type='button';
+    rm.className='ref-thumb-remove';
+    rm.textContent='×';
+    rm.setAttribute('aria-label','移除参考图 '+(index+1));
+    rm.onclick=e=>{e.stopPropagation();removeRefImageAt(index)};
+    thumb.appendChild(rm);
+    refPreviewGrid.appendChild(thumb);
+  });
+  updateRefStats();
+}
+
+function removeRefImageAt(index){
+  const file=refImageFiles[index];
+  if(file&&file._objectURL)URL.revokeObjectURL(file._objectURL);
+  refImageFiles.splice(index,1);
+  renderRefPreviews();
+  enforceReferenceModel();
   showStatus('已移除参考图');
+}
+
+function clearRefImages(){
+  for(const file of refImageFiles){
+    if(file._objectURL)URL.revokeObjectURL(file._objectURL);
+  }
+  refImageFiles=[];
+  renderRefPreviews();
 }
 
 function showPlaceholder(){
@@ -451,6 +521,132 @@ function showPlaceholder(){
   updateOutputActions();
 }
 showPlaceholder();
+
+const REDUCED_MOTION=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+class GenParticles{
+  constructor(canvas){
+    this.canvas=canvas;
+    this.ctx=canvas.getContext('2d');
+    this.raf=0;
+    this.particles=[];
+    this.t=0;
+    this.alive=false;
+    this.resize();
+  }
+  resize(){
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    const rect=this.canvas.getBoundingClientRect();
+    const w=Math.max(1,rect.width),h=Math.max(1,rect.height);
+    this.canvas.width=Math.round(w*dpr);
+    this.canvas.height=Math.round(h*dpr);
+    this.ctx.setTransform(dpr,0,0,dpr,0,0);
+    this.w=w;this.h=h;
+    this.init();
+  }
+  init(){
+    const cx=this.w/2,cy=this.h*0.45;
+    const count=REDUCED_MOTION?0:46;
+    this.particles=[];
+    for(let i=0;i<count;i++){
+      this.particles.push(this._spawn(Math.random()*Math.PI*2,Math.random()*8));
+    }
+    this.cx=cx;this.cy=cy;
+  }
+  _spawn(angle,radius){
+    return{
+      angle,
+      radius:radius+Math.random()*4,
+      speed:0.6+Math.random()*1.4,
+      spin:(Math.random()-0.5)*0.05,
+      size:0.8+Math.random()*2.2,
+      life:Math.random(),
+      hue:172+Math.random()*22,
+      alpha:0.35+Math.random()*0.5
+    };
+  }
+  start(){
+    if(this.alive||REDUCED_MOTION)return;
+    this.alive=true;
+    const loop=()=>{if(!this.alive)return;this._tick();this.raf=requestAnimationFrame(loop)};
+    this.raf=requestAnimationFrame(loop);
+  }
+  stop(){
+    this.alive=false;
+    if(this.raf){cancelAnimationFrame(this.raf);this.raf=0}
+  }
+  _tick(){
+    const ctx=this.ctx;
+    ctx.clearRect(0,0,this.w,this.h);
+    this.t+=0.016;
+    const cx=this.cx,cy=this.cy;
+    const maxR=Math.max(this.w,this.h)*0.55;
+    for(const p of this.particles){
+      p.radius+=p.speed;
+      p.angle+=p.spin;
+      p.life+=0.012;
+      if(p.radius>maxR){
+        Object.assign(p,this._spawn(Math.random()*Math.PI*2,0));
+        continue;
+      }
+      const x=cx+Math.cos(p.angle)*p.radius;
+      const y=cy+Math.sin(p.angle)*p.radius*0.92;
+      const fade=Math.min(1,(maxR-p.radius)/maxR*1.3);
+      const a=p.alpha*fade;
+      const sz=p.size*(0.6+fade*0.8);
+      const grad=ctx.createRadialGradient(x,y,0,x,y,sz*3);
+      grad.addColorStop(0,`hsla(${p.hue},75%,68%,${a})`);
+      grad.addColorStop(1,`hsla(${p.hue},75%,55%,0)`);
+      ctx.fillStyle=grad;
+      ctx.beginPath();ctx.arc(x,y,sz*3,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle=`hsla(${p.hue},90%,75%,${a})`;
+      ctx.beginPath();ctx.arc(x,y,sz,0,Math.PI*2);ctx.fill();
+    }
+  }
+}
+
+function addGenPlaceholder(label,sub){
+  const grid=$('imagesGrid');
+  const ph=document.querySelector('.placeholder');
+  if(ph)ph.remove();
+  const card=document.createElement('div');
+  card.className='gen-placeholder';
+  const canvas=document.createElement('canvas');
+  card.appendChild(canvas);
+  if(!REDUCED_MOTION){
+    const ring=document.createElement('div');
+    ring.className='gp-ring';
+    const ring2=document.createElement('div');
+    ring2.className='gp-ring r2';
+    card.append(ring,ring2);
+  }
+  const core=document.createElement('div');
+  core.className='gp-core';
+  card.appendChild(core);
+  const lbl=document.createElement('div');
+  lbl.className='gp-label';
+  lbl.innerHTML=`${escapeHtml(label||'正在生成…')}${sub?`<small>${escapeHtml(sub)}</small>`:''}`;
+  card.appendChild(lbl);
+  grid.appendChild(card);
+  const part=new GenParticles(canvas);
+  requestAnimationFrame(()=>{part.resize();part.start()});
+  return {card,part,labelEl:lbl};
+}
+
+function updateGenPlaceholderText(ref,label,sub){
+  if(!ref||!ref.labelEl)return;
+  ref.labelEl.innerHTML=`${escapeHtml(label||'正在生成…')}${sub?`<small>${escapeHtml(sub)}</small>`:''}`;
+}
+
+function removeGenPlaceholder(ref){
+  if(!ref)return;
+  ref.part.stop();
+  if(ref.card&&ref.card.parentNode){
+    ref.card.classList.add('fading');
+    const node=ref.card;
+    setTimeout(()=>{if(node.parentNode)node.parentNode.removeChild(node)},240);
+  }
+}
 
 function showStatus(msg,type='info'){
   const el=$('status');
@@ -486,7 +682,7 @@ $('count').addEventListener('change',updatePromptStats);
 $('modelSelect').addEventListener('change',()=>{
   const info=selectedModelInfo();
   setRefUploadEnabled(!!info?.supports_edits&&!!info?.ready);
-  if(refImageFile)enforceReferenceModel();
+  if(refImageFiles.length)enforceReferenceModel();
 });
 updatePromptStats();
 
@@ -509,8 +705,8 @@ function makeTasks(){
     optionId:choice.id,
     count,
     promptIndex:index,
-    refFile:refImageFile,
-    hasRef:!!refImageFile
+    refFiles:refImageFiles.slice(),
+    hasRef:refImageFiles.length>0
   }));
 }
 
@@ -521,7 +717,7 @@ function confirmLargeRun(tasks){
 }
 
 function buildImageRequest(task){
-  if(task.refFile){
+  if(task.refFiles&&task.refFiles.length){
     const formData=new FormData();
     formData.append('prompt',task.fullPrompt);
     formData.append('size',task.size);
@@ -529,7 +725,7 @@ function buildImageRequest(task){
     if(task.quality)formData.append('quality',task.quality);
     if(task.model)formData.append('model',task.model);
     if(task.source)formData.append('source',task.source);
-    formData.append('image',task.refFile,task.refFile.name||'reference-image');
+    task.refFiles.forEach(f=>formData.append('image',f,f.name||'reference-image'));
     return {url:EDITS_API_URL,options:{method:'POST',body:formData}};
   }
   const body={prompt:task.fullPrompt,size:task.size,n:task.count,model:task.model,source:task.source};
@@ -540,12 +736,27 @@ function buildImageRequest(task){
   };
 }
 
+function onGenerateClick(){
+  if(generating){stopGeneration();return}
+  generate();
+}
+
 function setBusy(busy){
   generating=busy;
-  $('generateBtn').disabled=busy;
-  $('stopBtn').style.display=busy?'inline-flex':'none';
-  $('spinner').style.display=busy?'block':'none';
-  $('btnText').textContent=busy?'生成中...':'生成图片';
+  const btn=$('generateBtn');
+  const btnText=$('btnText');
+  if(busy){
+    btn.classList.add('is-stop');
+    btn.disabled=false;
+    btnText.textContent='停止生成';
+    $('spinner').style.display='none';
+  }else{
+    btn.classList.remove('is-stop');
+    btn.disabled=false;
+    btnText.textContent='生成图片';
+    $('spinner').style.display='none';
+  }
+  $('stopBtn').style.display='none';
 }
 
 function stopGeneration(){
@@ -574,7 +785,7 @@ async function generate(){
     style:$('style').value,
     quality:$('quality').value,
     model:selectedGenerationChoice().id,
-    hasRef:!!refImageFile
+    refCount:refImageFiles.length
   };
   $('imagesGrid').innerHTML='';
   await runTasks(tasks,{append:false});
@@ -596,6 +807,7 @@ async function runTasks(tasks,{append=false}={}){
       }
       $('outputTitle').textContent=`正在生成 ${completed+1}/${tasks.length} 个任务`;
       showStatus(`正在生成任务 ${completed+1}/${tasks.length}，预计 ${task.count} 张`);
+      const gp=addGenPlaceholder(`任务 ${completed+1}/${tasks.length}`,`预计 ${task.count} 张 · ${escapeHtml(task.model||'')}`);
       try{
         const {url,options}=buildImageRequest(task);
         activeController=new AbortController();
@@ -625,11 +837,13 @@ async function runTasks(tasks,{append=false}={}){
       }catch(e){
         if(e.name==='AbortError'){
           stopped=true;
+          updateGenPlaceholderText(gp,'正在停止…','已取消当前请求');
           break;
         }
         failedTasks.push(task);
         addErrorCard(`任务 ${task.promptIndex+1} 失败: ${e.message}`,task);
       }finally{
+        removeGenPlaceholder(gp);
         activeController=null;
         completed++;
         updateOutputActions();
@@ -656,6 +870,7 @@ async function runTasks(tasks,{append=false}={}){
     await refreshIdentity();
     updateOutputActions();
     renderRunMeta(tasks,expected);
+    if(currentResults.length===0&&failedTasks.length===0)showPlaceholder();
   }
 }
 
@@ -677,7 +892,7 @@ function renderRunMeta(tasks,expected){
     `<span class="pill">${escapeHtml(model)}</span>`,
     `<span class="pill">${escapeHtml(first.size)}</span>`,
     `<span class="pill">质量 ${escapeHtml(quality)}</span>`,
-    first.hasRef?'<span class="pill">参考图</span>':''
+    first.hasRef?`<span class="pill">参考图 ×${first.refFiles?.length||0}</span>`:''
   ].join('');
 }
 
@@ -1016,7 +1231,7 @@ function saveHistory(entry){
     quality:entry.quality,
     model:entry.model,
     time:new Date().toLocaleString(),
-    hasRef:entry.hasRef,
+    refCount:entry.refCount||0,
     success:entry.success,
     failed:entry.failed,
     totalExpected:entry.totalExpected
@@ -1044,7 +1259,9 @@ function renderHistory(){
     const prompts=h.prompts||[h.prompt||''];
     const label=prompts.length>1?`${prompts.length} 项`:'单条';
     const success=h.success??h.count??0;
-    return `<div class="history-item" onclick="reuse(${i})"><div class="mark">${escapeHtml(label)}</div><div class="info"><p>${escapeHtml(prompts[0]||'')}</p><span>${escapeHtml(h.model||'默认模型')} · ${escapeHtml(h.size||'')} · ${escapeHtml(h.time||'')}${success?` · ${success}张`:''}${h.failed?` · 失败${h.failed}`:''}${h.hasRef?' · 参考图':''}</span></div></div>`;
+    const refCount=h.refCount??(h.hasRef?1:0);
+    const refStr=refCount?` · 参考×${refCount}`:'';
+    return `<div class="history-item" onclick="reuse(${i})"><div class="mark">${escapeHtml(label)}</div><div class="info"><p>${escapeHtml(prompts[0]||'')}</p><span>${escapeHtml(h.model||'默认模型')} · ${escapeHtml(h.size||'')} · ${escapeHtml(h.time||'')}${success?` · ${success}张`:''}${h.failed?` · 失败${h.failed}`:''}${refStr}</span></div></div>`;
   }).join('');
 }
 
@@ -1062,7 +1279,8 @@ function reuse(idx){
   $('quality').value=h.quality||'';
   updatePromptStats();
   $('outputTitle').textContent='历史记录（已恢复参数）';
-  showStatus(h.hasRef?'已恢复历史参数；参考图需要重新上传':'已恢复历史参数','info');
+  const refCount=h.refCount??(h.hasRef?1:0);
+  showStatus(refCount?`已恢复历史参数；参考图需重新上传（${refCount} 张）`:'已恢复历史参数','info');
 }
 
 function clearHistory(){localStorage.removeItem('imgGenHistory');renderHistory()}

@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import errno
 import json
@@ -223,8 +224,60 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(posts[0]["data"]["size"], "1024x1024")
         self.assertEqual(posts[0]["data"]["n"], "1")
         self.assertEqual(posts[0]["data"]["response_format"], "b64_json")
-        self.assertIn("image", posts[0]["files"])
-        self.assertEqual(posts[0]["files"]["image"][0], "ref.png")
+        image_parts = [item for item in posts[0]["files"] if item[0] == "image"]
+        self.assertEqual(len(image_parts), 1)
+        self.assertEqual(image_parts[0][1][0], "ref.png")
+
+    def test_edits_forwards_multiple_images(self):
+        posts = []
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"merged"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "merged"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                posts.append({"url": url, "headers": headers, "data": data, "files": files})
+                return FakeResponse()
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient):
+            r = self.client.post(
+                "/api/edits",
+                data={"prompt": "merge these", "size": "1024x1024", "n": "1", "model": "gpt-image-2", "source": "chat2api"},
+                files=[
+                    ("image", ("a.png", b"png-a", "image/png")),
+                    ("image", ("b.png", b"png-b", "image/png")),
+                ],
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
+        image_parts = [item for item in posts[0]["files"] if item[0] == "image"]
+        self.assertEqual(len(image_parts), 2)
+        self.assertEqual(image_parts[0][1][0], "a.png")
+        self.assertEqual(image_parts[1][1][0], "b.png")
+
+    def test_edits_rejects_too_many_images(self):
+        r = self.client.post(
+            "/api/edits",
+            data={"prompt": "too many", "size": "1024x1024", "n": "1", "model": "gpt-image-2", "source": "chat2api"},
+            files=[("image", (f"ref{i}.png", b"png-bytes", "image/png")) for i in range(5)],
+            headers=self.headers,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("参考图最多", r.json()["detail"])
 
     def test_edits_forward_to_relay_source(self):
         posts = []
@@ -357,12 +410,38 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(calls[-1][2]["access_tokens"], [token])
         self.assertNotIn(token, json.dumps(r.json(), ensure_ascii=False))
 
+    def test_accounts_update_accepts_token_id_and_redacts_response(self):
+        token = "eyJhbGciOiJSUzI1NiIs.update-account-token"
+        calls = []
+
+        async def fake_request(method, path, *, json_body=None):
+            calls.append((method, path, json_body))
+            if method == "GET":
+                return 200, {"items": [{"email": "a@example.com", "access_token": token, "disabled": False}]}
+            return 200, {"item": {"email": "a@example.com", "access_token": token, "disabled": json_body["disabled"]}}
+
+        token_id = self.main._token_id(token)
+        with patch.object(self.main, "_c2a_raw_request", fake_request):
+            r = self.client.post(
+                "/api/accounts/update",
+                json={"token_id": token_id, "disabled": True, "reset_consecutive_fail": True},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(calls[-1][:2], ("POST", "/api/accounts/update"))
+        self.assertEqual(calls[-1][2]["access_token"], token)
+        self.assertTrue(calls[-1][2]["disabled"])
+        self.assertTrue(calls[-1][2]["reset_consecutive_fail"])
+        self.assertNotIn(token, json.dumps(r.json(), ensure_ascii=False))
+
 
         accounts = {
             "items": [
                 {"email": "ok@example.com", "status": "normal", "quota": 4, "access_token": "normal-token-1234567890"},
                 {"email": "bad@example.com", "status": "异常", "quota": 3, "access_token": "bad-token-1234567890"},
                 {"email": "zero@example.com", "status": "normal", "quota": 0, "access_token": "zero-token-1234567890"},
+                {"email": "disabled@example.com", "status": "异常", "quota": 0, "disabled": True, "access_token": "disabled-token-1234567890"},
             ]
         }
         deleted = []
@@ -390,6 +469,7 @@ class AdminFeatureTests(unittest.TestCase):
             data = r.json()
             self.assertEqual(data["count"], 2)
             self.assertEqual(set(deleted), {"bad-token-1234567890", "zero-token-1234567890"})
+            self.assertNotIn("disabled-token-1234567890", set(deleted))
             self.assertNotIn("zero-token-1234567890", json.dumps(data, ensure_ascii=False))
 
     def test_generate_maps_upstream_auth_failure_without_logging_out_user(self):
@@ -702,8 +782,10 @@ class AdminFeatureTests(unittest.TestCase):
             )
 
         self.assertEqual(r.status_code, 200)
-        self.assertIn("image", captured["files"])
-        self.assertNotIn("image[]", captured["files"])
+        image_parts = [item for item in captured["files"] if item[0] == "image"]
+        self.assertEqual(len(image_parts), 1)
+        self.assertEqual(image_parts[0][1][0], "ref.png")
+        self.assertNotIn("image[]", [item[0] for item in captured["files"]])
         self.assertEqual(captured["data"]["n"], "2")
         self.assertEqual(captured["data"]["quality"], "high")
 
@@ -790,7 +872,9 @@ class AdminFeatureTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(captured["url"], "https://relay.example/v1/images/edits")
         self.assertEqual(captured["data"]["quality"], "medium")
-        self.assertIn("image", captured["files"])
+        image_parts = [item for item in captured["files"] if item[0] == "image"]
+        self.assertEqual(len(image_parts), 1)
+        self.assertEqual(image_parts[0][1][0], "ref.png")
 
     def test_edits_accepts_generic_upload_content_type(self):
         class FakeResponse:
@@ -822,6 +906,57 @@ class AdminFeatureTests(unittest.TestCase):
             )
 
         self.assertEqual(r.status_code, 200)
+
+    def test_generate_cancels_on_client_disconnect(self):
+        posts = []
+
+        class SlowResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"late"}]}'
+
+            def json(self):
+                return {"data": [{"b64_json": "late"}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None, data=None, files=None):
+                posts.append({"url": url, "json": json})
+                # 模拟上游慢响应：协程被 cancel 时抛 CancelledError
+                await asyncio.sleep(10)
+                return SlowResponse()
+
+        # 第一次 is_disconnected()（进入信号量后的前置检查）返回 False，让请求进入 _await_cancellable；
+        # 之后轮询返回 True，触发取消。
+        disconnect_state = {"count": 0}
+
+        async def fake_is_disconnected(self):
+            disconnect_state["count"] += 1
+            return disconnect_state["count"] > 1
+
+        with patch.object(self.main.httpx, "AsyncClient", FakeClient), \
+             patch.object(self.main.Request, "is_disconnected", fake_is_disconnected):
+            r = self.client.post(
+                "/api/generate",
+                json={"prompt": "slow image", "size": "1024x1024", "n": 1},
+                headers=self.headers,
+            )
+
+        self.assertEqual(r.status_code, 499)
+        self.assertIn("客户端已取消", r.json()["detail"])
+        # 取消不应计入 failed 统计
+        usage = self.client.get("/api/usage", headers=self.headers).json()
+        self.assertEqual(usage["failed_images"], 0)
+        self.assertEqual(usage["successful_images"], 0)
+        # 上游 post 已被触发（之后被 cancel 中断）
+        self.assertEqual(len(posts), 1)
 
 
 if __name__ == "__main__":
