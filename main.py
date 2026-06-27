@@ -991,6 +991,9 @@ def _token_id(token: str) -> str:
 def _public_account_item(item: dict) -> dict:
     public = _redact_c2a_response(item)
     token = str(item.get("access_token") or item.get("accessToken") or item.get("token") or "").strip()
+    status = str(public.get("status") or item.get("status") or "").strip().lower()
+    if "disabled" not in public:
+        public["disabled"] = status in {"禁用", "disabled"}
     if token:
         public["token_id"] = _token_id(token)
         public["token_masked"] = _mask_token(token)
@@ -1207,6 +1210,9 @@ async def update_account(body: AccountUpdateBody, _: dict = Depends(require_admi
     upstream_body: dict = {"access_token": access_token}
     if body.disabled is not None:
         upstream_body["disabled"] = body.disabled
+        # 兼容当前远端 chatgpt2api：旧版没有 disabled 字段，但支持 status=禁用/正常 且可用性过滤会跳过"禁用"。
+        if body.status is None:
+            upstream_body["status"] = "禁用" if body.disabled else "正常"
     if body.status is not None:
         upstream_body["status"] = body.status
     if body.type is not None:
