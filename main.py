@@ -1,5 +1,6 @@
 import base64
 import asyncio
+import contextlib
 import errno
 import hashlib
 import ipaddress
@@ -18,7 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -35,6 +36,7 @@ MODE = os.getenv("MODE", "relay").lower()
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "180"))
 MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
 MAX_EDIT_IMAGE_BYTES = int(os.getenv("MAX_EDIT_IMAGE_BYTES", str(10 * 1024 * 1024)))
+MAX_EDIT_IMAGES_COUNT = int(os.getenv("MAX_EDIT_IMAGES_COUNT", "4"))
 MAX_CHAT_IMAGE_BYTES = int(os.getenv("MAX_CHAT_IMAGE_BYTES", str(20 * 1024 * 1024)))
 MAX_CONCURRENT_IMAGE_REQUESTS = int(os.getenv("MAX_CONCURRENT_IMAGE_REQUESTS", "3"))
 USER_RATE_LIMIT_PER_MINUTE = int(os.getenv("USER_RATE_LIMIT_PER_MINUTE", "30"))
@@ -277,7 +279,7 @@ def _short_error(value) -> str:
     return text[:240]
 
 
-def _record_usage(ident: dict, endpoint: str, mode: str, requested: int, result, status_code: int, elapsed_ms: int) -> None:
+def _record_usage(ident: dict, endpoint: str, mode: str, requested: int, result, status_code: int, elapsed_ms: int, *, ref_count: int | None = None) -> None:
     success, item_errors = _image_result_counts(result)
     failed = max(requested - success, item_errors, 0) if status_code < 400 else requested
     user_id = str(ident.get("id") or ident.get("name") or "unknown")
@@ -305,6 +307,8 @@ def _record_usage(ident: dict, endpoint: str, mode: str, requested: int, result,
         "status_code": status_code,
         "elapsed_ms": elapsed_ms,
     }
+    if ref_count is not None:
+        event["ref_count"] = ref_count
     error = _short_error(result)
     if error:
         event["error"] = error
@@ -711,7 +715,7 @@ async def generate_via_chat2api(req: GenerateRequest, model: str):
 # ---------- routes ----------
 
 @app.post("/api/generate")
-async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
+async def generate(req: GenerateRequest, request: Request, ident: dict = Depends(require_user)):
     _enforce_user_rate_limit(ident, req.n)
     _check_user_quota(ident, req.n)
     model, mode = _resolve_model_choice(req.model, req.source)
@@ -720,35 +724,74 @@ async def generate(req: GenerateRequest, ident: dict = Depends(require_user)):
     result = None
     try:
         async with _image_semaphore:
-            if mode == "chat2api":
-                result = await generate_via_chat2api(req, model)
-            else:
-                result = await generate_via_relay(req, model)
+            if await request.is_disconnected():
+                raise HTTPException(499, "客户端已取消生成")
+            coro = generate_via_chat2api(req, model) if mode == "chat2api" else generate_via_relay(req, model)
+            result = await _await_cancellable(request, coro)
         status_code = result.status_code if isinstance(result, JSONResponse) else 200
         if status_code < 400:
             _consume_user_quota(ident, _count_success_images(result, req.n))
         return result
     except HTTPException as e:
         status_code = e.status_code
-        result = {"error": e.detail}
+        if e.status_code != 499:
+            result = {"error": e.detail}
         raise
     finally:
         if result is not None:
             _record_usage(ident, "generate", mode, req.n, result, status_code, int((time.perf_counter() - started) * 1000))
 
 
-async def _read_edit_image(image: UploadFile) -> bytes:
-    content = await image.read(MAX_EDIT_IMAGE_BYTES + 1)
-    if not content:
+async def _await_cancellable(request: Request, coro):
+    """等待上游协程，期间轮询客户端连接；断开则取消上游请求并抛 499。
+
+    上游请求被包成独立 task，CancelledError 能可靠中断 httpx 的 await client.post(...)
+    并关闭底层连接池。注意：上游 chatgpt2api 在线程池里同步跑 requests，本端取消
+    不会中断其线程，上游账号配额可能已扣（不可逆），属预期限制。
+    """
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=0.5)
+            if done:
+                return task.result()  # 正常返回或 re-raise task 内异常（含 HTTPException）
+            if await request.is_disconnected():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                raise HTTPException(499, "客户端已取消生成")
+    except BaseException:
+        # 外层被取消/异常时也要清理 task，避免悬挂协程
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        raise
+
+
+async def _read_edit_image(image: UploadFile) -> tuple[bytes, str, str]:
+    return (await _read_edit_images([image]))[0]
+
+
+async def _read_edit_images(images: list[UploadFile]) -> list[tuple[bytes, str, str]]:
+    if not images:
         raise HTTPException(400, "参考图不能为空")
-    if len(content) > MAX_EDIT_IMAGE_BYTES:
-        max_mb = MAX_EDIT_IMAGE_BYTES / (1024 * 1024)
-        limit = f"{math.ceil(MAX_EDIT_IMAGE_BYTES / 1024)}KB" if max_mb < 1 else f"{max_mb:g}MB"
-        raise HTTPException(413, f"参考图不能超过 {limit}")
-    content_type = (image.content_type or "").lower()
-    if content_type and content_type != "application/octet-stream" and content_type not in EDIT_IMAGE_TYPES:
-        raise HTTPException(400, "参考图仅支持 PNG、JPG、WEBP")
-    return content
+    if len(images) > MAX_EDIT_IMAGES_COUNT:
+        raise HTTPException(400, f"参考图最多 {MAX_EDIT_IMAGES_COUNT} 张")
+    max_mb = MAX_EDIT_IMAGE_BYTES / (1024 * 1024)
+    limit_label = f"{math.ceil(MAX_EDIT_IMAGE_BYTES / 1024)}KB" if max_mb < 1 else f"{max_mb:g}MB"
+    result: list[tuple[bytes, str, str]] = []
+    for image in images:
+        content = await image.read(MAX_EDIT_IMAGE_BYTES + 1)
+        if not content:
+            raise HTTPException(400, "参考图不能为空")
+        if len(content) > MAX_EDIT_IMAGE_BYTES:
+            raise HTTPException(413, f"参考图不能超过 {limit_label}")
+        content_type = (image.content_type or "").lower()
+        if content_type and content_type != "application/octet-stream" and content_type not in EDIT_IMAGE_TYPES:
+            raise HTTPException(400, "参考图仅支持 PNG、JPG、WEBP")
+        result.append((content, image.filename or "ref.png", content_type or "image/png"))
+    return result
 
 
 async def _post_edit_request(url: str, headers: dict, data: dict, files: dict, stage: str, *, trust_env: bool = True):
@@ -768,9 +811,7 @@ async def _post_edit_request(url: str, headers: dict, data: dict, files: dict, s
 async def edit_via_relay(
     *,
     prompt: str,
-    content: bytes,
-    filename: str,
-    content_type: str,
+    images: list[tuple[bytes, str, str]],
     size: str,
     n: int,
     quality: str | None,
@@ -778,7 +819,7 @@ async def edit_via_relay(
 ):
     cfg = _require_relay_config()
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
-    files = {"image": (filename, content, content_type)}
+    files = [("image", (filename, content, content_type)) for content, filename, content_type in images]
     data = {"model": model, "prompt": prompt, "size": size, "n": str(n)}
     if quality:
         data["quality"] = quality
@@ -788,9 +829,7 @@ async def edit_via_relay(
 async def edit_via_chat2api(
     *,
     prompt: str,
-    content: bytes,
-    filename: str,
-    content_type: str,
+    images: list[tuple[bytes, str, str]],
     size: str,
     n: int,
     quality: str | None,
@@ -799,7 +838,7 @@ async def edit_via_chat2api(
     if not CHAT_KEY:
         raise HTTPException(500, "账号池生图 key 未配置，请联系管理员")
     headers = {"Authorization": f"Bearer {CHAT_KEY}"}
-    files = {"image": (filename, content, content_type)}
+    files = [("image", (filename, content, content_type)) for content, filename, content_type in images]
     data = {"model": model, "prompt": prompt, "size": size, "n": str(n), "response_format": "b64_json"}
     if quality:
         data["quality"] = quality
@@ -809,7 +848,8 @@ async def edit_via_chat2api(
 @app.post("/api/edits")
 async def edits(
     prompt: Annotated[str, Form()],
-    image: Annotated[UploadFile, File()],
+    image: Annotated[list[UploadFile], File()],
+    request: Request,
     size: Annotated[str, Form()] = "1024x1024",
     n: Annotated[int, Form()] = 1,
     quality: Annotated[str | None, Form()] = None,
@@ -828,36 +868,34 @@ async def edits(
     started = time.perf_counter()
     status_code = 200
     result = None
-    content = await _read_edit_image(image)
-    filename = image.filename or "ref.png"
-    content_type = image.content_type or "image/png"
+    images = await _read_edit_images(image)
+    ref_count = len(images)
     try:
         async with _image_semaphore:
+            if await request.is_disconnected():
+                raise HTTPException(499, "客户端已取消生成")
             kwargs = {
                 "prompt": prompt,
-                "content": content,
-                "filename": filename,
-                "content_type": content_type,
+                "images": images,
                 "size": size,
                 "n": n,
                 "quality": quality,
                 "model": selected_model,
             }
-            if selected_source == "chat2api":
-                result = await edit_via_chat2api(**kwargs)
-            else:
-                result = await edit_via_relay(**kwargs)
+            coro = edit_via_chat2api(**kwargs) if selected_source == "chat2api" else edit_via_relay(**kwargs)
+            result = await _await_cancellable(request, coro)
         status_code = result.status_code if isinstance(result, JSONResponse) else 200
         if status_code < 400:
             _consume_user_quota(ident, _count_success_images(result, n))
         return result
     except HTTPException as e:
         status_code = e.status_code
-        result = {"error": e.detail}
+        if e.status_code != 499:
+            result = {"error": e.detail}
         raise
     finally:
         if result is not None:
-            _record_usage(ident, "edits", mode, n, result, status_code, int((time.perf_counter() - started) * 1000))
+            _record_usage(ident, "edits", mode, n, result, status_code, int((time.perf_counter() - started) * 1000), ref_count=ref_count)
 
 
 @app.get("/api/health")
@@ -1076,6 +1114,8 @@ def _cleanup_candidate(item: dict, body: CleanupAccountsBody) -> bool:
     token = str(item.get("access_token") or "").strip()
     if not token:
         return False
+    if bool(item.get("disabled")):
+        return False
     status = str(item.get("status") or "").strip()
     if body.statuses and status in body.statuses:
         return True
@@ -1145,6 +1185,37 @@ async def cleanup_accounts(body: CleanupAccountsBody, _: dict = Depends(require_
 async def refresh_accounts(body: TokenListBody, _: dict = Depends(require_admin)):
     tokens = await _resolve_account_tokens(body.tokens, body.token_ids)
     status, content = await _c2a_raw_request("POST", "/api/accounts/refresh", json_body={"access_tokens": tokens})
+    return JSONResponse(status_code=status, content=_redact_c2a_response(content))
+
+
+class AccountUpdateBody(BaseModel):
+    token_id: str = ""
+    access_token: str = ""
+    disabled: Optional[bool] = None
+    status: Optional[str] = Field(default=None, max_length=40)
+    type: Optional[str] = Field(default=None, max_length=40)
+    quota: Optional[int] = None
+    reset_consecutive_fail: bool = False
+
+
+@app.post("/api/accounts/update")
+async def update_account(body: AccountUpdateBody, _: dict = Depends(require_admin)):
+    tokens = await _resolve_account_tokens([body.access_token], [body.token_id] if body.token_id else [])
+    if not tokens:
+        raise HTTPException(400, "token_id 或 access_token is required")
+    access_token = tokens[0]
+    upstream_body: dict = {"access_token": access_token}
+    if body.disabled is not None:
+        upstream_body["disabled"] = body.disabled
+    if body.status is not None:
+        upstream_body["status"] = body.status
+    if body.type is not None:
+        upstream_body["type"] = body.type
+    if body.quota is not None:
+        upstream_body["quota"] = body.quota
+    if body.reset_consecutive_fail:
+        upstream_body["reset_consecutive_fail"] = True
+    status, content = await _c2a_raw_request("POST", "/api/accounts/update", json_body=upstream_body)
     return JSONResponse(status_code=status, content=_redact_c2a_response(content))
 
 

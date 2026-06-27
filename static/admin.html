@@ -43,6 +43,8 @@ tbody tr:hover{background:rgba(124,92,252,0.04)}
 .b-warn{background:rgba(251,191,36,0.15);color:var(--warn)}
 .b-err{background:rgba(248,113,113,0.15);color:var(--danger)}
 .b-type{background:rgba(124,92,252,0.15);color:var(--accent2)}
+.b-disabled{background:rgba(148,163,184,0.15);color:#94a3b8;border:1px dashed rgba(148,163,184,0.4)}
+.btn-toggle-disable{padding:4px 10px;font-size:.74rem;min-height:28px}
 .email{font-family:'SF Mono',Consolas,monospace;font-size:.78rem;color:var(--text)}
 .quota{font-weight:600;font-size:.95rem}
 .quota.low{color:var(--warn)}
@@ -228,7 +230,8 @@ function fmtDate(iso){
   }catch(e){ return iso.slice(0,19).replace('T',' '); }
 }
 
-function statusBadge(s){
+function statusBadge(s, disabled){
+  if(disabled) return '<span class="badge b-disabled">已禁用</span>';
   const value = escapeHtml(s || '未知');
   if(!s) return '<span class="badge b-err">未知</span>';
   if(s.includes('正常') || s === 'normal') return `<span class="badge b-ok">${value}</span>`;
@@ -351,17 +354,21 @@ async function loadAccounts(){
       html += `<tr>
         <td><span class="email">${escapeHtml(item.email || '-')}</span></td>
         <td><span class="badge b-type">${escapeHtml(item.type || '-')}</span></td>
-        <td>${statusBadge(item.status)}</td>
+        <td>${statusBadge(item.status, item.disabled)}</td>
         <td>${quotaCell(item)}</td>
         <td>${escapeHtml(fmtDate(item.restoreAt))}</td>
-        <td><span class="muted">${escapeHtml(item.token_masked || shortToken(item.access_token || ''))}</span></td>
+        <td><span class="muted">${escapeHtml(item.token_masked || shortToken(item.access_token || ''))}</span>${item.consecutiveFail?`<div class="muted">连续失败 ${escapeHtml(item.consecutiveFail)}</div>`:''}</td>
         <td><div class="actions">
+          <button class="btn ${item.disabled?'btn-primary':'btn-secondary'} btn-toggle-disable account-toggle-btn" data-token-id="${escapeHtml(item.token_id || '')}" data-disabled="${item.disabled?'1':'0'}" data-email="${escapeHtml(item.email || '')}" ${item.token_id ? '' : 'disabled'}>${item.disabled?'启用':'禁用'}</button>
           <button class="btn btn-danger account-delete-btn" data-token-id="${escapeHtml(item.token_id || '')}" data-email="${escapeHtml(item.email || '')}" ${item.token_id ? '' : 'disabled'}>删除</button>
         </div></td>
       </tr>`;
     }
     html += '</tbody></table></div>';
     $('accountsBox').innerHTML = html;
+    document.querySelectorAll('.account-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => toggleAccountDisable(btn.dataset.tokenId || '', btn.dataset.disabled === '1', btn.dataset.email || ''));
+    });
     document.querySelectorAll('.account-delete-btn').forEach(btn => {
       btn.addEventListener('click', () => removeToken(btn.dataset.tokenId || '', btn.dataset.email || ''));
     });
@@ -392,6 +399,26 @@ async function addTokens(){
     toast('添加失败：' + e.message, 'error');
   }finally{
     btn.classList.remove('loading'); btn.disabled = false;
+  }
+}
+
+async function toggleAccountDisable(tokenId, currentlyDisabled, email){
+  if(!tokenId){ toast('账号缺少操作标识，请刷新列表后重试', 'error'); return; }
+  const nextDisabled = !currentlyDisabled;
+  if(nextDisabled && !confirm(`确认禁用账号 ${email || '该账号'} 吗？禁用后将不再参与生图。`)) return;
+  try{
+    const r = await authedFetch('/api/accounts/update', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token_id:tokenId, disabled:nextDisabled, reset_consecutive_fail:!nextDisabled})
+    });
+    const d = await r.json();
+    if(!r.ok){ throw new Error(errMsg(d)); }
+    toast(nextDisabled ? '账号已禁用' : '账号已启用', 'success');
+    await loadAccounts();
+    await loadUsage();
+  }catch(e){
+    toast((nextDisabled ? '禁用失败：' : '启用失败：') + e.message, 'error');
   }
 }
 
